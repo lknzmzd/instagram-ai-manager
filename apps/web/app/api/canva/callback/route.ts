@@ -34,7 +34,14 @@ export async function GET(req: Request) {
 
   if (!clientId || !clientSecret || !redirectUri) {
     return NextResponse.json(
-      { error: "Missing Canva env vars" },
+      {
+        error: "Missing Canva env vars",
+        debug: {
+          CANVA_CLIENT_ID: !!clientId,
+          CANVA_CLIENT_SECRET: !!clientSecret,
+          CANVA_REDIRECT_URI: !!redirectUri
+        }
+      },
       { status: 500 }
     );
   }
@@ -51,7 +58,7 @@ export async function GET(req: Request) {
     cookieStore.set("canva_access_token", tokenData.access_token, {
       httpOnly: true,
       sameSite: "lax",
-      secure: false,
+      secure: true,
       path: "/"
     });
 
@@ -59,7 +66,7 @@ export async function GET(req: Request) {
       cookieStore.set("canva_refresh_token", tokenData.refresh_token, {
         httpOnly: true,
         sameSite: "lax",
-        secure: false,
+        secure: true,
         path: "/"
       });
     }
@@ -67,7 +74,7 @@ export async function GET(req: Request) {
     cookieStore.delete("canva_oauth_state");
     cookieStore.delete("canva_code_verifier");
 
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}?canva=connected`);
+    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}?canva=connected`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown Canva callback error";
     return NextResponse.json({ error: message }, { status: 500 });
