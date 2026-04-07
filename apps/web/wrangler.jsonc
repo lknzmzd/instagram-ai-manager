@@ -8,6 +8,16 @@
     "nodejs_compat",
     "nodejs_compat_populate_process_env"
   ],
+  "vars": {
+    "CANVA_CLIENT_ID": "OC-AZ1ZzkfVaP3T",
+    "CANVA_REDIRECT_URI": "https://ai.lknzmzd.xyz/api/canva/callback",
+    "CANVA_SCOPES": "profile:read asset:read design:meta:read design:content:read design:content:write",
+    "NEXT_PUBLIC_APP_URL": "https://ai.lknzmzd.xyz",
+    "NEXT_PUBLIC_SUPABASE_URL": "https://vrkcqfqzimcoifqhhfhq.supabase.co",
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY": "sb_publishable_39vYFxQQT4iE4iVGwFVzGw_9B1ET4Hd",
+    "OPENAI_IMAGE_MODEL": "gpt-image-1-mini",
+    "INSTAGRAM_BUSINESS_ID": "17841401975326542"
+  },
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
