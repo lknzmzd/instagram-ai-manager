@@ -3,6 +3,7 @@
   "main": ".open-next/worker.js",
   "name": "instagram-ai-manager",
   "compatibility_date": "2026-04-07",
+  "keep_vars": true,
   "compatibility_flags": [
     "nodejs_compat",
     "nodejs_compat_populate_process_env"
