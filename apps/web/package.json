@@ -6,9 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy"
   },
   "dependencies": {
+    "@opennextjs/cloudflare": "^1.18.0",
     "@supabase/supabase-js": "^2.53.0",
     "next": "^15.4.0",
     "openai": "^5.10.2",
@@ -19,6 +22,7 @@
   "devDependencies": {
     "@types/node": "25.5.0",
     "@types/react": "19.2.14",
-    "typescript": "6.0.2"
+    "typescript": "6.0.2",
+    "wrangler": "^4.81.0"
   }
 }
