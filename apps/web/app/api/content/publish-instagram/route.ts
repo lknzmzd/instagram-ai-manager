@@ -24,7 +24,6 @@ function buildCaption(item: {
 }) {
   const caption = item.caption ?? "";
   const hashtags = Array.isArray(item.hashtags) ? item.hashtags.join(" ") : "";
-
   return `${caption}\n\n${hashtags}`.trim();
 }
 
@@ -236,7 +235,28 @@ export async function POST(req: Request) {
       );
     }
 
-    const instagramMediaId = publishData?.id ?? null;
+    const instagramMediaId = publishData?.id;
+
+    if (!instagramMediaId) {
+      await logPostResult({
+        contentItemId: id,
+        mediaUrl,
+        caption,
+        status: "failed",
+        errorMessage: "Instagram publish succeeded but media ID is not available",
+      }).catch(() => null);
+
+      return NextResponse.json(
+        {
+          success: false,
+          step: "publish_media",
+          error: "Instagram publish succeeded but media ID is not available",
+          meta: publishData,
+        },
+        { status: 500 }
+      );
+    }
+
     const now = new Date().toISOString();
 
     const { data: updated, error: updateError } = await supabaseAdmin
