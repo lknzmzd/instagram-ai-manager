@@ -11,6 +11,10 @@ function parseDataUrl(dataUrl: string) {
   const base64Data = match[2];
   const buffer = Buffer.from(base64Data, "base64");
 
+  if (!buffer.length) {
+    throw new Error("Decoded file buffer is empty");
+  }
+
   return { mimeType, buffer };
 }
 
@@ -25,10 +29,19 @@ export async function uploadGeneratedImageToStorage(params: {
   contentItemId: string;
   dataUrl: string;
 }) {
+  if (!params.contentItemId?.trim()) {
+    throw new Error("contentItemId is required");
+  }
+
+  if (!params.dataUrl?.startsWith("data:image/")) {
+    throw new Error("Only image data URLs are supported");
+  }
+
   const { mimeType, buffer } = parseDataUrl(params.dataUrl);
   const ext = getExtensionFromMime(mimeType);
 
-  const path = `generated/${params.contentItemId}-${Date.now()}.${ext}`;
+  const safeId = params.contentItemId.replace(/[^a-zA-Z0-9_-]/g, "");
+  const path = `generated/${safeId}-${Date.now()}.${ext}`;
 
   const { error: uploadError } = await supabaseAdmin.storage
     .from("instagram-media")
