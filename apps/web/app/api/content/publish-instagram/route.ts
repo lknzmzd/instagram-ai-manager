@@ -24,7 +24,13 @@ export async function POST(req: Request) {
 
     if (item.status !== "approved") {
       return NextResponse.json(
-        { error: "Only approved items can be published" },
+        {
+          error: "Only approved items can be published",
+          debug: {
+            status: item.status,
+            prompt_status: item.prompt_status
+          }
+        },
         { status: 400 }
       );
     }
@@ -65,9 +71,11 @@ export async function POST(req: Request) {
     if (!createRes.ok) {
       return NextResponse.json(
         {
+          step: "create_media_container",
           error:
             createData?.error?.message ||
-            "Failed to create IG media container"
+            "Failed to create IG media container",
+          meta: createData
         },
         { status: 500 }
       );
@@ -77,7 +85,11 @@ export async function POST(req: Request) {
 
     if (!creationId) {
       return NextResponse.json(
-        { error: "Instagram creation_id missing" },
+        {
+          step: "create_media_container",
+          error: "Instagram creation_id missing",
+          meta: createData
+        },
         { status: 500 }
       );
     }
@@ -99,9 +111,11 @@ export async function POST(req: Request) {
     if (!publishRes.ok) {
       return NextResponse.json(
         {
+          step: "publish_media",
           error:
             publishData?.error?.message ||
-            "Failed to publish Instagram media"
+            "Failed to publish Instagram media",
+          meta: publishData
         },
         { status: 500 }
       );
