@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
+import { getValidInstagramCredentials } from "@/lib/instagramTokens";
 
 const GRAPH_URL = "https://graph.facebook.com/v24.0";
 
@@ -35,27 +36,27 @@ export async function POST(req: Request) {
       );
     }
 
-    const token = process.env.INSTAGRAM_ACCESS_TOKEN;
-    const igUserId = process.env.INSTAGRAM_BUSINESS_ID;
+    const { accessToken, instagramBusinessId } =
+      await getValidInstagramCredentials();
 
-    if (!token || !igUserId) {
+    if (!accessToken || !instagramBusinessId) {
       return NextResponse.json(
         { error: "Instagram credentials missing" },
         { status: 500 }
       );
     }
 
-    const caption = `${item.caption}\n\n${
+    const caption = `${item.caption ?? ""}\n\n${
       Array.isArray(item.hashtags) ? item.hashtags.join(" ") : ""
-    }`;
+    }`.trim();
 
-    const createRes = await fetch(`${GRAPH_URL}/${igUserId}/media`, {
+    const createRes = await fetch(`${GRAPH_URL}/${instagramBusinessId}/media`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         image_url: item.public_image_url,
         caption,
-        access_token: token
+        access_token: accessToken
       })
     });
 
@@ -63,7 +64,11 @@ export async function POST(req: Request) {
 
     if (!createRes.ok) {
       return NextResponse.json(
-        { error: createData?.error?.message || "Failed to create IG media container" },
+        {
+          error:
+            createData?.error?.message ||
+            "Failed to create IG media container"
+        },
         { status: 500 }
       );
     }
@@ -77,20 +82,27 @@ export async function POST(req: Request) {
       );
     }
 
-    const publishRes = await fetch(`${GRAPH_URL}/${igUserId}/media_publish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        creation_id: creationId,
-        access_token: token
-      })
-    });
+    const publishRes = await fetch(
+      `${GRAPH_URL}/${instagramBusinessId}/media_publish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          creation_id: creationId,
+          access_token: accessToken
+        })
+      }
+    );
 
     const publishData = await publishRes.json();
 
     if (!publishRes.ok) {
       return NextResponse.json(
-        { error: publishData?.error?.message || "Failed to publish Instagram media" },
+        {
+          error:
+            publishData?.error?.message ||
+            "Failed to publish Instagram media"
+        },
         { status: 500 }
       );
     }
@@ -109,7 +121,10 @@ export async function POST(req: Request) {
       .single();
 
     if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      return NextResponse.json(
+        { error: updateError.message },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({
@@ -118,7 +133,10 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Unknown publish error" },
+      {
+        error:
+          err instanceof Error ? err.message : "Unknown publish error"
+      },
       { status: 500 }
     );
   }
