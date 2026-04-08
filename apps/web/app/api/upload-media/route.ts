@@ -8,26 +8,29 @@ export async function POST(req: Request) {
 
     if (!contentItemId || !dataUrl) {
       return NextResponse.json(
-        { success: false, error: "Missing contentItemId or dataUrl" },
+        {
+          success: false,
+          error: "Missing contentItemId or dataUrl",
+        },
         { status: 400 }
       );
     }
 
     const result = await uploadGeneratedImageToStorage({
       contentItemId,
-      dataUrl
+      dataUrl,
     });
 
     return NextResponse.json({
       success: true,
       path: result.path,
-      publicUrl: result.publicUrl
+      publicUrl: result.publicUrl,
     });
   } catch (error) {
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : "Unknown upload error"
+        error: error instanceof Error ? error.message : "Unknown upload error",
       },
       { status: 500 }
     );
