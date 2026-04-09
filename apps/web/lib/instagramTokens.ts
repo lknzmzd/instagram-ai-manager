@@ -23,8 +23,29 @@ export type ValidInstagramCredentials = {
   isExpired: boolean;
 };
 
+export type InstagramTokenValidationResult = {
+  valid: boolean;
+  error?: string | null;
+  meta?: {
+    app_id?: string;
+    type?: string;
+    application?: string;
+    expires_at?: number;
+    is_valid?: boolean;
+    profile_id?: string;
+    user_id?: string;
+    scopes?: string[];
+  } | null;
+  instagramUser?: {
+    id?: string;
+    username?: string;
+  } | null;
+  matchesStoredBusinessId?: boolean | null;
+};
+
 const REFRESH_BEFORE_DAYS = 7;
 const MIN_REFRESH_AGE_HOURS = 24;
+const GRAPH_BASE = "https://graph.facebook.com";
 
 function addSecondsToNow(seconds: number) {
   return new Date(Date.now() + seconds * 1000).toISOString();
@@ -93,6 +114,103 @@ export async function getActiveInstagramAccount(): Promise<InstagramAccountRow> 
   }
 
   return data as InstagramAccountRow;
+}
+
+async function safeJson(response: Response) {
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
+}
+
+export async function validateInstagramAccessToken(
+  account?: InstagramAccountRow
+): Promise<InstagramTokenValidationResult> {
+  const activeAccount = account ?? (await getActiveInstagramAccount());
+  const appToken = process.env.META_APP_ID && process.env.META_APP_SECRET
+    ? `${process.env.META_APP_ID}|${process.env.META_APP_SECRET}`
+    : null;
+
+  if (!appToken) {
+    return {
+      valid: false,
+      error: "META_APP_ID or META_APP_SECRET is missing"
+    };
+  }
+
+  const debugUrl = new URL(`${GRAPH_BASE}/debug_token`);
+  debugUrl.searchParams.set("input_token", activeAccount.access_token);
+  debugUrl.searchParams.set("access_token", appToken);
+
+  const debugRes = await fetch(debugUrl.toString(), {
+    method: "GET",
+    cache: "no-store"
+  });
+
+  const debugData = await safeJson(debugRes);
+
+  if (!debugRes.ok) {
+    return {
+      valid: false,
+      error:
+        debugData?.error?.message ||
+        debugData?.raw ||
+        "Failed to debug Instagram token",
+      meta: null,
+      instagramUser: null,
+      matchesStoredBusinessId: null
+    };
+  }
+
+  const tokenData = debugData?.data;
+  const isValid = Boolean(tokenData?.is_valid);
+
+  if (!isValid) {
+    return {
+      valid: false,
+      error: tokenData?.error?.message || "Token is not valid",
+      meta: tokenData ?? null,
+      instagramUser: null,
+      matchesStoredBusinessId: null
+    };
+  }
+
+  const meUrl = new URL(`${GRAPH_BASE}/v24.0/me`);
+  meUrl.searchParams.set("fields", "id,username");
+  meUrl.searchParams.set("access_token", activeAccount.access_token);
+
+  const meRes = await fetch(meUrl.toString(), {
+    method: "GET",
+    cache: "no-store"
+  });
+
+  const meData = await safeJson(meRes);
+
+  let instagramUser: { id?: string; username?: string } | null = null;
+  let matchesStoredBusinessId: boolean | null = null;
+
+  if (meRes.ok) {
+    instagramUser = {
+      id: meData?.id,
+      username: meData?.username
+    };
+
+    if (meData?.id) {
+      matchesStoredBusinessId =
+        String(meData.id) === String(activeAccount.instagram_business_id);
+    }
+  }
+
+  return {
+    valid: true,
+    error: null,
+    meta: tokenData ?? null,
+    instagramUser,
+    matchesStoredBusinessId
+  };
 }
 
 export async function refreshInstagramLongLivedToken(currentToken: string) {
@@ -175,6 +293,21 @@ export async function getValidInstagramCredentials(
 
   const account = await getActiveInstagramAccount();
 
+  const liveValidation = await validateInstagramAccessToken(account);
+
+  if (!liveValidation.valid) {
+    throw new Error(
+      liveValidation.error ||
+        "Instagram access token is invalid. Reconnect the account and store a new long-lived token."
+    );
+  }
+
+  if (liveValidation.matchesStoredBusinessId === false) {
+    throw new Error(
+      "Stored instagram_business_id does not match the token owner. Update the active database record."
+    );
+  }
+
   const isExpired = hasInstagramTokenExpired(account.expires_at);
   const shouldRefreshSoon = shouldRefreshInstagramToken(
     account.expires_at,
@@ -234,9 +367,7 @@ export async function getValidInstagramCredentials(
       ),
       isExpired: false
     };
-  } catch (error) {
-    // If refresh fails but current token is still valid, keep using it.
-    // This avoids breaking publish flows because of transient refresh issues.
+  } catch {
     return {
       instagramBusinessId: account.instagram_business_id,
       accessToken: account.access_token,
@@ -250,6 +381,7 @@ export async function getValidInstagramCredentials(
 
 export async function getInstagramTokenHealth() {
   const account = await getActiveInstagramAccount();
+  const validation = await validateInstagramAccessToken(account);
 
   return {
     accountId: account.id,
@@ -259,6 +391,11 @@ export async function getInstagramTokenHealth() {
     lastRefreshedAt: account.last_refreshed_at,
     isExpired: hasInstagramTokenExpired(account.expires_at),
     shouldRefreshSoon: shouldRefreshInstagramToken(account.expires_at),
-    isRefreshEligible: isInstagramTokenRefreshEligible(account)
+    isRefreshEligible: isInstagramTokenRefreshEligible(account),
+    metaValid: validation.valid,
+    metaError: validation.error ?? null,
+    tokenOwnerId: validation.instagramUser?.id ?? null,
+    tokenOwnerUsername: validation.instagramUser?.username ?? null,
+    matchesStoredBusinessId: validation.matchesStoredBusinessId
   };
 }
