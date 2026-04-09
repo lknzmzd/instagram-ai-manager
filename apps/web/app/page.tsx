@@ -44,6 +44,23 @@ type InstagramTokenHealth = {
   isRefreshEligible: boolean;
 };
 
+type QueueItem = {
+  id: string;
+  concept_title: string;
+  caption: string | null;
+  status: string | null;
+  prompt_status: string | null;
+  queue_status: string | null;
+  render_status: string | null;
+  publish_status: string | null;
+  scheduled_for: string | null;
+  published_at: string | null;
+  public_image_url: string | null;
+  instagram_media_id: string | null;
+  automation_batch_id: string | null;
+  created_at: string;
+};
+
 type FilterType = "all" | "drafted" | "approved" | "rejected";
 
 async function safeJson<T = any>(res: Response): Promise<T> {
@@ -101,14 +118,33 @@ async function fetchTokenHealth() {
   return data;
 }
 
+async function fetchQueue() {
+  const res = await fetch("/api/automation/queue", {
+    cache: "no-store"
+  });
+
+  const data = await safeJson<{
+    queue?: QueueItem[];
+    error?: string;
+  }>(res);
+
+  if (!res.ok) {
+    throw new Error(data?.error || "Failed to load automation queue");
+  }
+
+  return data;
+}
+
 export default function HomePage() {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [logs, setLogs] = useState<PostLog[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
   const [tokenHealth, setTokenHealth] = useState<InstagramTokenHealth | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [loadingLogs, setLoadingLogs] = useState(true);
   const [loadingTokenHealth, setLoadingTokenHealth] = useState(true);
+  const [loadingQueue, setLoadingQueue] = useState(true);
   const [clearingLogs, setClearingLogs] = useState(false);
   const [filter, setFilter] = useState<FilterType>("all");
 
@@ -170,10 +206,29 @@ export default function HomePage() {
     }
   }
 
+  async function loadQueue() {
+    try {
+      setLoadingQueue(true);
+      const data = await fetchQueue();
+      setQueue(Array.isArray(data.queue) ? data.queue : []);
+    } catch (error) {
+      console.error("Failed to load automation queue:", error);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to load automation queue"
+      );
+      setQueue([]);
+    } finally {
+      setLoadingQueue(false);
+    }
+  }
+
   useEffect(() => {
     load();
     loadLogs();
     loadTokenHealth();
+    loadQueue();
   }, []);
 
   async function clearLogs() {
@@ -231,6 +286,7 @@ export default function HomePage() {
       );
 
       setMessage(`Status updated to ${status}`);
+      await loadQueue();
     } catch (error) {
       console.error(error);
       alert(error instanceof Error ? error.message : "Failed to update status");
@@ -269,6 +325,7 @@ export default function HomePage() {
       );
 
       setMessage(`Prompt status updated to ${promptStatus}`);
+      await loadQueue();
     } catch (error) {
       console.error(error);
       alert(
@@ -296,6 +353,7 @@ export default function HomePage() {
 
       setItems((prev) => prev.filter((item) => item.id !== id));
       setMessage("Item deleted");
+      await loadQueue();
     } catch (error) {
       console.error(error);
       alert(error instanceof Error ? error.message : "Failed to delete item");
@@ -325,6 +383,7 @@ export default function HomePage() {
       }
 
       await load();
+      await loadQueue();
       setFilter("drafted");
       setMessage("Content batch generated");
     } catch (error) {
@@ -354,6 +413,7 @@ export default function HomePage() {
 
       setItems((prev) => prev.map((item) => (item.id === id ? data.item! : item)));
       setMessage("Image generated");
+      await loadQueue();
     } catch (error) {
       console.error(error);
       alert(error instanceof Error ? error.message : "Failed to generate image");
@@ -382,6 +442,7 @@ export default function HomePage() {
       setItems((prev) => prev.map((item) => (item.id === id ? data.item! : item)));
       setMessage("Image uploaded to public storage");
       await loadLogs();
+      await loadQueue();
     } catch (error) {
       console.error(error);
       alert(error instanceof Error ? error.message : "Failed to upload image");
@@ -442,6 +503,7 @@ export default function HomePage() {
       setItems((prev) => prev.map((item) => (item.id === id ? data.item! : item)));
       await loadLogs();
       await loadTokenHealth();
+      await loadQueue();
 
       setMessage(
         data.instagramMediaId
@@ -457,6 +519,7 @@ export default function HomePage() {
       );
       await loadLogs();
       await loadTokenHealth();
+      await loadQueue();
     } finally {
       setBusyId(null);
     }
@@ -491,11 +554,29 @@ export default function HomePage() {
     };
   }, [items]);
 
+  const queueStats = useMemo(() => {
+    const total = queue.length;
+    const ready = queue.filter((item) => item.queue_status === "ready").length;
+    const processing = queue.filter((item) => item.queue_status === "processing").length;
+    const posted = queue.filter((item) => item.queue_status === "posted").length;
+    const failed = queue.filter((item) => item.queue_status === "failed").length;
+
+    return { total, ready, processing, posted, failed };
+  }, [queue]);
+
   function getStatusColor(status: string) {
     if (status === "approved") return "#22c55e";
     if (status === "rejected") return "#ef4444";
     if (status === "drafted") return "#f59e0b";
     return "#a3a3a3";
+  }
+
+  function getQueueColor(status: string | null) {
+    if (status === "ready") return "#2563eb";
+    if (status === "processing") return "#f59e0b";
+    if (status === "posted") return "#16a34a";
+    if (status === "failed") return "#dc2626";
+    return "#444";
   }
 
   function getTokenStatusColor() {
@@ -610,7 +691,7 @@ export default function HomePage() {
       </h1>
 
       <div style={{ marginBottom: "24px", fontSize: "15px", opacity: 0.8 }}>
-        Content generation, approval, image production, storage upload, Instagram publishing, and log tracking.
+        Content generation, approval, image production, storage upload, Instagram publishing, and automation tracking.
       </div>
 
       {message && (
@@ -757,6 +838,132 @@ export default function HomePage() {
         {statCard("Published", stats.published, "#8b5cf6")}
       </div>
 
+      <section
+        style={{
+          marginBottom: "24px",
+          padding: "18px",
+          background: "#0d0f14",
+          border: "1px solid #2a2a2a",
+          borderRadius: "12px"
+        }}
+      >
+        <div
+          style={{
+            marginBottom: "14px",
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            flexWrap: "wrap",
+            alignItems: "center"
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "22px", fontWeight: 800, marginBottom: "4px" }}>
+              Automation Queue
+            </div>
+            <div style={{ fontSize: "13px", opacity: 0.75 }}>
+              Scheduled posts for the automation engine.
+            </div>
+          </div>
+
+          <button
+            onClick={loadQueue}
+            disabled={loadingQueue}
+            style={{
+              padding: "10px 14px",
+              background: loadingQueue ? "#555" : "#1f2937",
+              border: "none",
+              borderRadius: "8px",
+              color: "white",
+              cursor: loadingQueue ? "not-allowed" : "pointer",
+              fontWeight: 700
+            }}
+          >
+            {loadingQueue ? "Refreshing..." : "Refresh Queue"}
+          </button>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "12px",
+            flexWrap: "wrap",
+            marginBottom: "18px"
+          }}
+        >
+          {statCard("Queued Total", queueStats.total, "#ffffff")}
+          {statCard("Ready", queueStats.ready, "#2563eb")}
+          {statCard("Processing", queueStats.processing, "#f59e0b")}
+          {statCard("Posted", queueStats.posted, "#16a34a")}
+          {statCard("Failed", queueStats.failed, "#dc2626")}
+        </div>
+
+        {loadingQueue ? (
+          <div style={{ opacity: 0.75 }}>Loading automation queue...</div>
+        ) : queue.length === 0 ? (
+          <div style={{ opacity: 0.75 }}>No scheduled queue items yet.</div>
+        ) : (
+          <div style={{ display: "grid", gap: "10px" }}>
+            {queue.map((item) => (
+              <div
+                key={item.id}
+                style={{
+                  padding: "14px",
+                  borderRadius: "10px",
+                  background: "#0b0d12",
+                  border: "1px solid #23262d"
+                }}
+              >
+                <div
+                  style={{
+                    marginBottom: "10px",
+                    display: "flex",
+                    gap: "8px",
+                    flexWrap: "wrap",
+                    alignItems: "center"
+                  }}
+                >
+                  {pill(item.queue_status || "unknown", getQueueColor(item.queue_status))}
+                  {pill(item.publish_status || "not_published", item.publish_status === "published" ? "#7c3aed" : "#444")}
+                  {item.automation_batch_id && pill(item.automation_batch_id, "#334155")}
+                </div>
+
+                <div style={{ fontSize: "18px", fontWeight: 700, marginBottom: "8px" }}>
+                  {item.concept_title}
+                </div>
+
+                <div style={{ fontSize: "13px", opacity: 0.8, lineHeight: 1.7 }}>
+                  <div>
+                    <strong>Scheduled:</strong>{" "}
+                    {item.scheduled_for
+                      ? new Date(item.scheduled_for).toLocaleString()
+                      : "Not scheduled"}
+                  </div>
+                  <div>
+                    <strong>Published:</strong>{" "}
+                    {item.published_at
+                      ? new Date(item.published_at).toLocaleString()
+                      : "Not yet"}
+                  </div>
+                  <div>
+                    <strong>Status:</strong> {item.status || "unknown"} / {item.prompt_status || "unknown"}
+                  </div>
+                  <div>
+                    <strong>Instagram Media ID:</strong> {item.instagram_media_id || "—"}
+                  </div>
+                </div>
+
+                {item.caption && (
+                  <div style={{ marginTop: "10px", fontSize: "14px", opacity: 0.9 }}>
+                    <strong>Caption:</strong> {item.caption}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <div style={{ marginBottom: "20px", display: "flex", gap: "10px", flexWrap: "wrap" }}>
         <a
           href="/api/canva/connect"
@@ -795,6 +1002,7 @@ export default function HomePage() {
             load();
             loadLogs();
             loadTokenHealth();
+            loadQueue();
           }}
           style={{
             padding: "10px 16px",
