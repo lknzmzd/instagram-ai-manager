@@ -33,6 +33,17 @@ type PostLog = {
   created_at: string;
 };
 
+type InstagramTokenHealth = {
+  accountId: string;
+  accountName: string | null;
+  instagramBusinessId: string;
+  expiresAt: string | null;
+  lastRefreshedAt: string | null;
+  isExpired: boolean;
+  shouldRefreshSoon: boolean;
+  isRefreshEligible: boolean;
+};
+
 type FilterType = "all" | "drafted" | "approved" | "rejected";
 
 async function safeJson<T = any>(res: Response): Promise<T> {
@@ -73,11 +84,31 @@ async function fetchLogs() {
   return data;
 }
 
+async function fetchTokenHealth() {
+  const res = await fetch("/api/instagram/token-status", {
+    cache: "no-store"
+  });
+
+  const data = await safeJson<{
+    health?: InstagramTokenHealth;
+    error?: string;
+  }>(res);
+
+  if (!res.ok) {
+    throw new Error(data?.error || "Failed to load Instagram token status");
+  }
+
+  return data;
+}
+
 export default function HomePage() {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [logs, setLogs] = useState<PostLog[]>([]);
+  const [tokenHealth, setTokenHealth] = useState<InstagramTokenHealth | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [loadingLogs, setLoadingLogs] = useState(true);
+  const [loadingTokenHealth, setLoadingTokenHealth] = useState(true);
   const [clearingLogs, setClearingLogs] = useState(false);
   const [filter, setFilter] = useState<FilterType>("all");
 
@@ -121,9 +152,28 @@ export default function HomePage() {
     }
   }
 
+  async function loadTokenHealth() {
+    try {
+      setLoadingTokenHealth(true);
+      const data = await fetchTokenHealth();
+      setTokenHealth(data.health ?? null);
+    } catch (error) {
+      console.error("Failed to load token health:", error);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to load Instagram token status"
+      );
+      setTokenHealth(null);
+    } finally {
+      setLoadingTokenHealth(false);
+    }
+  }
+
   useEffect(() => {
     load();
     loadLogs();
+    loadTokenHealth();
   }, []);
 
   async function clearLogs() {
@@ -141,7 +191,11 @@ export default function HomePage() {
         method: "DELETE"
       });
 
-      const data = await safeJson<{ success?: boolean; error?: string; message?: string }>(res);
+      const data = await safeJson<{
+        success?: boolean;
+        error?: string;
+        message?: string;
+      }>(res);
 
       if (!res.ok) {
         throw new Error(data?.error || "Failed to clear post logs");
@@ -387,6 +441,8 @@ export default function HomePage() {
 
       setItems((prev) => prev.map((item) => (item.id === id ? data.item! : item)));
       await loadLogs();
+      await loadTokenHealth();
+
       setMessage(
         data.instagramMediaId
           ? `Published to Instagram successfully (${data.instagramMediaId})`
@@ -400,6 +456,7 @@ export default function HomePage() {
           : "Failed to publish to Instagram"
       );
       await loadLogs();
+      await loadTokenHealth();
     } finally {
       setBusyId(null);
     }
@@ -439,6 +496,20 @@ export default function HomePage() {
     if (status === "rejected") return "#ef4444";
     if (status === "drafted") return "#f59e0b";
     return "#a3a3a3";
+  }
+
+  function getTokenStatusColor() {
+    if (!tokenHealth) return "#6b7280";
+    if (tokenHealth.isExpired) return "#dc2626";
+    if (tokenHealth.shouldRefreshSoon) return "#f59e0b";
+    return "#16a34a";
+  }
+
+  function getTokenStatusText() {
+    if (!tokenHealth) return "Unknown";
+    if (tokenHealth.isExpired) return "Expired";
+    if (tokenHealth.shouldRefreshSoon) return "Refresh Soon";
+    return "Healthy";
   }
 
   function pill(text: string, color: string) {
@@ -558,6 +629,117 @@ export default function HomePage() {
         </div>
       )}
 
+      <section
+        style={{
+          marginBottom: "24px",
+          padding: "18px",
+          background: "#0d0f14",
+          border: "1px solid #2a2a2a",
+          borderRadius: "12px"
+        }}
+      >
+        <div
+          style={{
+            marginBottom: "14px",
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            flexWrap: "wrap",
+            alignItems: "center"
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "22px", fontWeight: 800, marginBottom: "4px" }}>
+              Instagram Token Status
+            </div>
+            <div style={{ fontSize: "13px", opacity: 0.75 }}>
+              Token health for your active Instagram publishing account.
+            </div>
+          </div>
+
+          <button
+            onClick={loadTokenHealth}
+            disabled={loadingTokenHealth}
+            style={{
+              padding: "10px 14px",
+              background: loadingTokenHealth ? "#555" : "#1f2937",
+              border: "none",
+              borderRadius: "8px",
+              color: "white",
+              cursor: loadingTokenHealth ? "not-allowed" : "pointer",
+              fontWeight: 700
+            }}
+          >
+            {loadingTokenHealth ? "Refreshing..." : "Refresh Token Status"}
+          </button>
+        </div>
+
+        {loadingTokenHealth ? (
+          <div style={{ opacity: 0.75 }}>Loading token status...</div>
+        ) : !tokenHealth ? (
+          <div style={{ opacity: 0.75 }}>No token status available.</div>
+        ) : (
+          <div style={{ display: "grid", gap: "12px" }}>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {pill(getTokenStatusText(), getTokenStatusColor())}
+              {tokenHealth.isRefreshEligible
+                ? pill("Refresh Eligible", "#2563eb")
+                : pill("Not Yet Refreshable", "#444")}
+            </div>
+
+            <div style={{ fontSize: "14px", lineHeight: 1.7 }}>
+              <div>
+                <strong>Account:</strong> {tokenHealth.accountName || "Unnamed account"}
+              </div>
+              <div>
+                <strong>Instagram Business ID:</strong> {tokenHealth.instagramBusinessId}
+              </div>
+              <div>
+                <strong>Expires At:</strong>{" "}
+                {tokenHealth.expiresAt
+                  ? new Date(tokenHealth.expiresAt).toLocaleString()
+                  : "Unknown"}
+              </div>
+              <div>
+                <strong>Last Refreshed:</strong>{" "}
+                {tokenHealth.lastRefreshedAt
+                  ? new Date(tokenHealth.lastRefreshedAt).toLocaleString()
+                  : "Never"}
+              </div>
+            </div>
+
+            <div
+              style={{
+                padding: "12px",
+                borderRadius: "10px",
+                background: tokenHealth.isExpired
+                  ? "#2a0d12"
+                  : tokenHealth.shouldRefreshSoon
+                  ? "#2b1d08"
+                  : "#0d1f15",
+                border: tokenHealth.isExpired
+                  ? "1px solid #5b1d28"
+                  : tokenHealth.shouldRefreshSoon
+                  ? "1px solid #6b4f1d"
+                  : "1px solid #1f5133",
+                color: tokenHealth.isExpired
+                  ? "#fecaca"
+                  : tokenHealth.shouldRefreshSoon
+                  ? "#fde68a"
+                  : "#bbf7d0",
+                fontSize: "14px"
+              }}
+            >
+              {tokenHealth.isExpired
+                ? "Token is expired. Publishing may fail until you reconnect and store a new long-lived token."
+                : tokenHealth.shouldRefreshSoon
+                ? "Token is still working, but it should be refreshed soon."
+                : "Token looks healthy and does not need refresh yet."}
+            </div>
+          </div>
+        )}
+      </section>
+
       <div
         style={{
           display: "flex",
@@ -612,6 +794,7 @@ export default function HomePage() {
           onClick={() => {
             load();
             loadLogs();
+            loadTokenHealth();
           }}
           style={{
             padding: "10px 16px",
