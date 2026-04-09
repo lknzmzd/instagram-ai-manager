@@ -50,11 +50,13 @@ async function fetchItems() {
     cache: "no-store"
   });
 
+  const data = await safeJson<{ items?: ContentItem[]; error?: string }>(res);
+
   if (!res.ok) {
-    throw new Error("Failed to load content items");
+    throw new Error(data?.error || "Failed to load content items");
   }
 
-  return safeJson<{ items: ContentItem[] }>(res);
+  return data;
 }
 
 async function fetchLogs() {
@@ -62,11 +64,13 @@ async function fetchLogs() {
     cache: "no-store"
   });
 
+  const data = await safeJson<{ logs?: PostLog[]; error?: string }>(res);
+
   if (!res.ok) {
-    throw new Error("Failed to load post logs");
+    throw new Error(data?.error || "Failed to load post logs");
   }
 
-  return safeJson<{ logs: PostLog[] }>(res);
+  return data;
 }
 
 export default function HomePage() {
@@ -74,6 +78,7 @@ export default function HomePage() {
   const [logs, setLogs] = useState<PostLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingLogs, setLoadingLogs] = useState(true);
+  const [clearingLogs, setClearingLogs] = useState(false);
   const [filter, setFilter] = useState<FilterType>("all");
 
   const [pageSlug, setPageSlug] = useState("mortaena");
@@ -94,6 +99,7 @@ export default function HomePage() {
       setMessage(
         error instanceof Error ? error.message : "Failed to load content items"
       );
+      setItems([]);
     } finally {
       setLoading(false);
     }
@@ -109,6 +115,7 @@ export default function HomePage() {
       setMessage(
         error instanceof Error ? error.message : "Failed to load post logs"
       );
+      setLogs([]);
     } finally {
       setLoadingLogs(false);
     }
@@ -118,6 +125,37 @@ export default function HomePage() {
     load();
     loadLogs();
   }, []);
+
+  async function clearLogs() {
+    const confirmed = window.confirm(
+      "Are you sure you want to delete all publish logs?"
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setClearingLogs(true);
+      setMessage("");
+
+      const res = await fetch("/api/post-logs", {
+        method: "DELETE"
+      });
+
+      const data = await safeJson<{ success?: boolean; error?: string; message?: string }>(res);
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to clear post logs");
+      }
+
+      setLogs([]);
+      setMessage(data?.message || "All post logs deleted");
+    } catch (error) {
+      console.error(error);
+      alert(error instanceof Error ? error.message : "Failed to clear post logs");
+    } finally {
+      setClearingLogs(false);
+    }
+  }
 
   async function updateStatus(id: string, status: "approved" | "rejected") {
     try {
@@ -376,7 +414,12 @@ export default function HomePage() {
     const approved = items.filter((item) => item.status === "approved").length;
     const drafted = items.filter((item) => item.status === "drafted").length;
     const rejected = items.filter((item) => item.status === "rejected").length;
-    const rendered = items.filter((item) => !!item.generated_image_url).length;
+    const rendered = items.filter(
+      (item) =>
+        !!item.generated_image_url ||
+        !!item.final_media_url ||
+        !!item.public_image_url
+    ).length;
     const storageReady = items.filter((item) => !!item.public_image_url).length;
     const published = items.filter((item) => item.publish_status === "published").length;
 
@@ -460,6 +503,10 @@ export default function HomePage() {
         <div style={{ fontSize: "28px", fontWeight: 800, color }}>{value}</div>
       </div>
     );
+  }
+
+  function getPreviewImage(item: ContentItem) {
+    return item.public_image_url || item.final_media_url || item.generated_image_url || null;
   }
 
   if (loading) {
@@ -716,21 +763,39 @@ export default function HomePage() {
             </div>
           </div>
 
-          <button
-            onClick={loadLogs}
-            disabled={loadingLogs}
-            style={{
-              padding: "10px 14px",
-              background: loadingLogs ? "#555" : "#1f2937",
-              border: "none",
-              borderRadius: "8px",
-              color: "white",
-              cursor: loadingLogs ? "not-allowed" : "pointer",
-              fontWeight: 700
-            }}
-          >
-            {loadingLogs ? "Refreshing..." : "Refresh Logs"}
-          </button>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              onClick={loadLogs}
+              disabled={loadingLogs || clearingLogs}
+              style={{
+                padding: "10px 14px",
+                background: loadingLogs || clearingLogs ? "#555" : "#1f2937",
+                border: "none",
+                borderRadius: "8px",
+                color: "white",
+                cursor: loadingLogs || clearingLogs ? "not-allowed" : "pointer",
+                fontWeight: 700
+              }}
+            >
+              {loadingLogs ? "Refreshing..." : "Refresh Logs"}
+            </button>
+
+            <button
+              onClick={clearLogs}
+              disabled={clearingLogs || loadingLogs}
+              style={{
+                padding: "10px 14px",
+                background: clearingLogs || loadingLogs ? "#555" : "#b91c1c",
+                border: "none",
+                borderRadius: "8px",
+                color: "white",
+                cursor: clearingLogs || loadingLogs ? "not-allowed" : "pointer",
+                fontWeight: 700
+              }}
+            >
+              {clearingLogs ? "Clearing..." : "Clear Logs"}
+            </button>
+          </div>
         </div>
 
         {loadingLogs ? (
@@ -851,10 +916,11 @@ export default function HomePage() {
             `${item.concept_title}. ${item.visual_brief}. ${item.on_image_text}`;
 
           const canGenerateImage = item.prompt_status === "approved";
-          const canUploadToStorage = !!item.generated_image_url;
+          const canUploadToStorage = !!item.generated_image_url && !item.public_image_url;
           const canSendToCanva = !!item.generated_image_url;
           const canPublish = item.status === "approved" && !!item.public_image_url;
           const isBusy = busyId === item.id;
+          const previewImage = getPreviewImage(item);
 
           return (
             <div
@@ -928,31 +994,13 @@ export default function HomePage() {
                 </div>
               </div>
 
-              {item.generated_image_url && (
+              {previewImage && (
                 <div style={{ marginBottom: "12px" }}>
                   <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "6px" }}>
-                    Generated image
+                    Preview image
                   </div>
                   <img
-                    src={item.generated_image_url}
-                    alt={`${item.concept_title} generated`}
-                    style={{
-                      width: "220px",
-                      maxWidth: "100%",
-                      borderRadius: "10px",
-                      border: "1px solid #333"
-                    }}
-                  />
-                </div>
-              )}
-
-              {item.final_media_url && (
-                <div style={{ marginBottom: "12px" }}>
-                  <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "6px" }}>
-                    Canva export
-                  </div>
-                  <img
-                    src={item.final_media_url}
+                    src={previewImage}
                     alt={item.concept_title}
                     style={{
                       width: "220px",
@@ -1016,7 +1064,7 @@ export default function HomePage() {
                   onClick={() => uploadToStorage(item.id)}
                   disabled={!canUploadToStorage || isBusy}
                   style={actionButtonStyle("#f59e0b", !canUploadToStorage || isBusy)}
-                  title={canUploadToStorage ? "Upload image to public storage" : "Generate image first"}
+                  title={canUploadToStorage ? "Upload image to public storage" : "Generate image first or already uploaded"}
                 >
                   {isBusy ? "Working..." : "Upload to Storage"}
                 </button>
