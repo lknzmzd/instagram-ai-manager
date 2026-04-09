@@ -24,7 +24,6 @@ function getLocalDateString(date: Date, timeZone: string) {
   }).formatToParts(date);
 
   const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-
   return `${map.year}-${map.month}-${map.day}`;
 }
 
@@ -143,11 +142,11 @@ export async function POST(req: NextRequest) {
 
     const pageSlug = body.page_slug || DEFAULT_PAGE_SLUG;
     const goal = body.goal || DEFAULT_GOAL;
-    const count = body.count || DEFAULT_COUNT;
+    const targetCount = body.count || DEFAULT_COUNT;
     const timezone = body.timezone || DEFAULT_TIMEZONE;
     const force = body.force === true;
 
-    if (count !== 21) {
+    if (targetCount !== 21) {
       return NextResponse.json(
         {
           success: false,
@@ -201,37 +200,60 @@ export async function POST(req: NextRequest) {
       timezone
     );
 
-    if (!force) {
-      const { count: existingCount, error: existingError } = await supabaseAdmin
-        .from("content_items")
-        .select("*", { count: "exact", head: true })
-        .eq("page_id", page.id)
-        .not("scheduled_for", "is", null)
-        .gte("scheduled_for", startUtc)
-        .lt("scheduled_for", endUtc);
+    const { count: existingCount, error: existingError } = await supabaseAdmin
+      .from("content_items")
+      .select("*", { count: "exact", head: true })
+      .eq("page_id", page.id)
+      .in("queue_status", ["ready", "processing"])
+      .neq("publish_status", "published")
+      .not("scheduled_for", "is", null)
+      .gte("scheduled_for", startUtc)
+      .lt("scheduled_for", endUtc);
 
-      if (existingError) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: existingError.message
-          },
-          { status: 500 }
-        );
-      }
+    if (existingError) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: existingError.message
+        },
+        { status: 500 }
+      );
+    }
 
-      if ((existingCount || 0) >= 21) {
-        return NextResponse.json({
-          success: true,
-          skipped: true,
-          reason: "A full 7-day queue already exists",
-          page_slug: pageSlug,
-          timezone,
-          existing_count: existingCount,
-          window_start: startUtc,
-          window_end: endUtc
-        });
-      }
+    const currentScheduledCount = existingCount || 0;
+
+    if (!force && currentScheduledCount >= targetCount) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        reason: "Queue is already full for the next 7 days",
+        page_slug: pageSlug,
+        timezone,
+        existing_count: currentScheduledCount,
+        target_count: targetCount,
+        missing_count: 0,
+        window_start: startUtc,
+        window_end: endUtc
+      });
+    }
+
+    const missingCount = force
+      ? targetCount
+      : Math.max(0, targetCount - currentScheduledCount);
+
+    if (missingCount === 0) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        reason: "No new posts needed",
+        page_slug: pageSlug,
+        timezone,
+        existing_count: currentScheduledCount,
+        target_count: targetCount,
+        missing_count: 0,
+        window_start: startUtc,
+        window_end: endUtc
+      });
     }
 
     const generated = await callInternalJson(
@@ -239,7 +261,7 @@ export async function POST(req: NextRequest) {
       "/api/content/generate-batch",
       {
         page_slug: pageSlug,
-        count,
+        count: missingCount,
         goal,
         auto_queue: true,
         timezone,
@@ -260,10 +282,12 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      automation: "weekly_batch_created",
+      automation: "weekly_batch_filled",
       page_slug: pageSlug,
       goal,
-      count,
+      target_count: targetCount,
+      existing_count: currentScheduledCount,
+      created_count: missingCount,
       timezone,
       local_start_date: localStartDate,
       window_start: startUtc,
