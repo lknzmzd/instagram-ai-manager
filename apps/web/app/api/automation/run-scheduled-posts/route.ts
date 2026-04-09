@@ -65,10 +65,47 @@ async function callInternalJson(
   return { res, data };
 }
 
+async function markFailed(id: string) {
+  await supabaseAdmin
+    .from("content_items")
+    .update({
+      queue_status: "failed",
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", id);
+}
+
+async function markProcessing(id: string) {
+  await supabaseAdmin
+    .from("content_items")
+    .update({
+      queue_status: "processing",
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", id);
+}
+
+async function getCurrentItem(id: string) {
+  const { data, error } = await supabaseAdmin
+    .from("content_items")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (error || !data) {
+    throw new Error("Failed to reload current item");
+  }
+
+  return data;
+}
+
 export async function POST(req: NextRequest) {
   try {
     if (!isAuthorized(req)) {
-      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
     }
 
     const now = new Date();
@@ -83,7 +120,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const { data: item, error } = await supabaseAdmin
+    const { data: candidate, error } = await supabaseAdmin
       .from("content_items")
       .select("*")
       .eq("queue_status", "ready")
@@ -96,12 +133,15 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       return NextResponse.json(
-        { success: false, error: error.message },
+        {
+          success: false,
+          error: error.message
+        },
         { status: 500 }
       );
     }
 
-    if (!item) {
+    if (!candidate) {
       return NextResponse.json({
         success: true,
         skipped: true,
@@ -110,34 +150,49 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const processingAt = new Date().toISOString();
+    // claim the row for processing
+    await markProcessing(candidate.id);
 
-    await supabaseAdmin
-      .from("content_items")
-      .update({
-        queue_status: "processing",
-        updated_at: processingAt
-      })
-      .eq("id", item.id);
+    let item = await getCurrentItem(candidate.id);
+
+    // full automation mode: ensure approval fields are ready
+    if (item.status !== "approved" || item.prompt_status !== "approved") {
+      const { data: fixedItem, error: fixError } = await supabaseAdmin
+        .from("content_items")
+        .update({
+          status: "approved",
+          prompt_status: "approved",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", item.id)
+        .select("*")
+        .single();
+
+      if (fixError || !fixedItem) {
+        await markFailed(item.id);
+
+        return NextResponse.json(
+          {
+            success: false,
+            step: "prepare_item",
+            error: fixError?.message || "Failed to prepare content item",
+            item_id: item.id
+          },
+          { status: 500 }
+        );
+      }
+
+      item = fixedItem;
+    }
 
     // Step 1: generate image if missing
     if (!item.generated_image_url) {
-      const generated = await callInternalJson(
-        req,
-        "/api/content/generate-image",
-        {
-          id: item.id
-        }
-      );
+      const generated = await callInternalJson(req, "/api/content/generate-image", {
+        id: item.id
+      });
 
       if (!generated.res.ok) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", item.id);
+        await markFailed(item.id);
 
         return NextResponse.json(
           {
@@ -150,33 +205,19 @@ export async function POST(req: NextRequest) {
           { status: 500 }
         );
       }
+
+      item = await getCurrentItem(item.id);
     }
 
     // Step 2: upload to storage if missing
-    const { data: afterGenerate } = await supabaseAdmin
-      .from("content_items")
-      .select("*")
-      .eq("id", item.id)
-      .single();
-
-    if (!afterGenerate?.public_image_url) {
-      const uploaded = await callInternalJson(
-        req,
-        "/api/content/upload-to-storage",
-        {
-          id: item.id,
-          scheduled_run: true
-        }
-      );
+    if (!item.public_image_url) {
+      const uploaded = await callInternalJson(req, "/api/content/upload-to-storage", {
+        id: item.id,
+        scheduled_run: true
+      });
 
       if (!uploaded.res.ok) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", item.id);
+        await markFailed(item.id);
 
         return NextResponse.json(
           {
@@ -189,6 +230,8 @@ export async function POST(req: NextRequest) {
           { status: 500 }
         );
       }
+
+      item = await getCurrentItem(item.id);
     }
 
     // Step 3: publish to Instagram
@@ -202,13 +245,7 @@ export async function POST(req: NextRequest) {
     );
 
     if (!published.res.ok) {
-      await supabaseAdmin
-        .from("content_items")
-        .update({
-          queue_status: "failed",
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", item.id);
+      await markFailed(item.id);
 
       return NextResponse.json(
         {
@@ -222,20 +259,27 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const finalItem = await getCurrentItem(item.id);
+
     return NextResponse.json({
       success: true,
       scheduled: true,
-      item_id: item.id,
-      scheduled_for: item.scheduled_for,
-      publish_result: published.data,
-      berlin_time: berlin
+      item_id: finalItem.id,
+      scheduled_for: finalItem.scheduled_for,
+      queue_status: finalItem.queue_status,
+      publish_status: finalItem.publish_status,
+      instagram_media_id: finalItem.instagram_media_id ?? null,
+      berlin_time: berlin,
+      publish_result: published.data
     });
   } catch (error) {
     return NextResponse.json(
       {
         success: false,
         error:
-          error instanceof Error ? error.message : "Unknown scheduled automation error"
+          error instanceof Error
+            ? error.message
+            : "Unknown scheduled automation error"
       },
       { status: 500 }
     );
