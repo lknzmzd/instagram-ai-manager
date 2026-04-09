@@ -3,13 +3,13 @@ import { supabaseAdmin } from "@/lib/supabase";
 
 const ALLOWED_LOCAL_HOURS = new Set([9, 12, 18]);
 const TIMEZONE = "Europe/Berlin";
+const MAX_RETRIES = 3;
 
 function isAuthorized(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
   const cronSecret = process.env.CRON_SECRET;
 
   if (!cronSecret) return false;
-
   return authHeader === `Bearer ${cronSecret}`;
 }
 
@@ -65,24 +65,21 @@ async function callInternalJson(
   return { res, data };
 }
 
-async function markFailed(id: string) {
-  await supabaseAdmin
+async function updateItem(
+  id: string,
+  patch: Record<string, unknown>
+) {
+  const { error } = await supabaseAdmin
     .from("content_items")
     .update({
-      queue_status: "failed",
+      ...patch,
       updated_at: new Date().toISOString()
     })
     .eq("id", id);
-}
 
-async function markProcessing(id: string) {
-  await supabaseAdmin
-    .from("content_items")
-    .update({
-      queue_status: "processing",
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", id);
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 async function getCurrentItem(id: string) {
@@ -97,6 +94,19 @@ async function getCurrentItem(id: string) {
   }
 
   return data;
+}
+
+async function markFailed(id: string, errorMessage: string, currentRetryCount: number) {
+  const nextRetryCount = currentRetryCount + 1;
+
+  await updateItem(id, {
+    queue_status: "failed",
+    retry_count: nextRetryCount,
+    last_error: errorMessage,
+    last_retry_at: new Date().toISOString()
+  });
+
+  return nextRetryCount;
 }
 
 export async function POST(req: NextRequest) {
@@ -133,10 +143,7 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       return NextResponse.json(
-        {
-          success: false,
-          error: error.message
-        },
+        { success: false, error: error.message },
         { status: 500 }
       );
     }
@@ -150,12 +157,28 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // claim the row for processing
-    await markProcessing(candidate.id);
+    await updateItem(candidate.id, {
+      queue_status: "processing"
+    });
 
     let item = await getCurrentItem(candidate.id);
+    const currentRetryCount = Number(item.retry_count || 0);
 
-    // full automation mode: ensure approval fields are ready
+    if (currentRetryCount >= MAX_RETRIES) {
+      await updateItem(item.id, {
+        queue_status: "failed",
+        last_error: `Retry limit reached (${MAX_RETRIES})`
+      });
+
+      return NextResponse.json({
+        success: false,
+        skipped: true,
+        reason: "Retry limit reached",
+        item_id: item.id,
+        retry_count: currentRetryCount
+      });
+    }
+
     if (item.status !== "approved" || item.prompt_status !== "approved") {
       const { data: fixedItem, error: fixError } = await supabaseAdmin
         .from("content_items")
@@ -169,14 +192,19 @@ export async function POST(req: NextRequest) {
         .single();
 
       if (fixError || !fixedItem) {
-        await markFailed(item.id);
+        const retryCount = await markFailed(
+          item.id,
+          fixError?.message || "Failed to prepare content item",
+          currentRetryCount
+        );
 
         return NextResponse.json(
           {
             success: false,
             step: "prepare_item",
             error: fixError?.message || "Failed to prepare content item",
-            item_id: item.id
+            item_id: item.id,
+            retry_count: retryCount
           },
           { status: 500 }
         );
@@ -185,14 +213,17 @@ export async function POST(req: NextRequest) {
       item = fixedItem;
     }
 
-    // Step 1: generate image if missing
     if (!item.generated_image_url) {
       const generated = await callInternalJson(req, "/api/content/generate-image", {
         id: item.id
       });
 
       if (!generated.res.ok) {
-        await markFailed(item.id);
+        const retryCount = await markFailed(
+          item.id,
+          generated.data?.error || "Failed to generate image",
+          currentRetryCount
+        );
 
         return NextResponse.json(
           {
@@ -200,6 +231,7 @@ export async function POST(req: NextRequest) {
             step: "generate_image",
             error: generated.data?.error || "Failed to generate image",
             item_id: item.id,
+            retry_count: retryCount,
             meta: generated.data
           },
           { status: 500 }
@@ -209,7 +241,6 @@ export async function POST(req: NextRequest) {
       item = await getCurrentItem(item.id);
     }
 
-    // Step 2: upload to storage if missing
     if (!item.public_image_url) {
       const uploaded = await callInternalJson(req, "/api/content/upload-to-storage", {
         id: item.id,
@@ -217,7 +248,11 @@ export async function POST(req: NextRequest) {
       });
 
       if (!uploaded.res.ok) {
-        await markFailed(item.id);
+        const retryCount = await markFailed(
+          item.id,
+          uploaded.data?.error || "Failed to upload to storage",
+          currentRetryCount
+        );
 
         return NextResponse.json(
           {
@@ -225,6 +260,7 @@ export async function POST(req: NextRequest) {
             step: "upload_to_storage",
             error: uploaded.data?.error || "Failed to upload to storage",
             item_id: item.id,
+            retry_count: retryCount,
             meta: uploaded.data
           },
           { status: 500 }
@@ -234,7 +270,6 @@ export async function POST(req: NextRequest) {
       item = await getCurrentItem(item.id);
     }
 
-    // Step 3: publish to Instagram
     const published = await callInternalJson(
       req,
       "/api/content/publish-instagram",
@@ -245,7 +280,11 @@ export async function POST(req: NextRequest) {
     );
 
     if (!published.res.ok) {
-      await markFailed(item.id);
+      const retryCount = await markFailed(
+        item.id,
+        published.data?.error || "Failed to publish to Instagram",
+        currentRetryCount
+      );
 
       return NextResponse.json(
         {
@@ -253,11 +292,18 @@ export async function POST(req: NextRequest) {
           step: "publish_instagram",
           error: published.data?.error || "Failed to publish to Instagram",
           item_id: item.id,
+          retry_count: retryCount,
           meta: published.data
         },
         { status: 500 }
       );
     }
+
+    await updateItem(item.id, {
+      queue_status: "posted",
+      retry_count: 0,
+      last_error: null
+    });
 
     const finalItem = await getCurrentItem(item.id);
 

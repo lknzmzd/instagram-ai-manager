@@ -19,6 +19,9 @@ export async function GET() {
         public_image_url,
         instagram_media_id,
         automation_batch_id,
+        retry_count,
+        last_error,
+        last_retry_at,
         created_at
       `)
       .not("scheduled_for", "is", null)
