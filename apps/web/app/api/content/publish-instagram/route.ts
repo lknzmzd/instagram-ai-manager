@@ -13,7 +13,7 @@ async function safeParseJson(response: Response) {
   } catch {
     return {
       raw,
-      parse_error: true,
+      parse_error: true
     };
   }
 }
@@ -44,7 +44,10 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { id } = body;
+    const { id, scheduled_run = false } = body as {
+      id?: string;
+      scheduled_run?: boolean;
+    };
 
     contentItemId = id ?? null;
 
@@ -65,7 +68,7 @@ export async function POST(req: Request) {
       await logPostResult({
         contentItemId: id,
         status: "failed",
-        errorMessage: "Item not found",
+        errorMessage: "Item not found"
       }).catch(() => null);
 
       return NextResponse.json(
@@ -74,14 +77,33 @@ export async function POST(req: Request) {
       );
     }
 
+    if (item.publish_status === "published") {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        reason: "Already published",
+        item
+      });
+    }
+
     if (item.status !== "approved") {
       await logPostResult({
         contentItemId: id,
         mediaUrl: item.public_image_url ?? null,
         caption: item.caption ?? null,
         status: "failed",
-        errorMessage: `Only approved items can be published. Current status: ${item.status}`,
+        errorMessage: `Only approved items can be published. Current status: ${item.status}`
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
@@ -89,8 +111,8 @@ export async function POST(req: Request) {
           error: "Only approved items can be published",
           debug: {
             status: item.status,
-            prompt_status: item.prompt_status,
-          },
+            prompt_status: item.prompt_status
+          }
         },
         { status: 400 }
       );
@@ -101,13 +123,23 @@ export async function POST(req: Request) {
         contentItemId: id,
         caption: item.caption ?? null,
         status: "failed",
-        errorMessage: "No public image URL found. Upload to storage first.",
+        errorMessage: "No public image URL found. Upload to storage first."
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
           success: false,
-          error: "No public image URL found. Upload to storage first.",
+          error: "No public image URL found. Upload to storage first."
         },
         { status: 400 }
       );
@@ -125,13 +157,23 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: "Instagram credentials missing",
+        errorMessage: "Instagram credentials missing"
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
           success: false,
-          error: "Instagram credentials missing",
+          error: "Instagram credentials missing"
         },
         { status: 500 }
       );
@@ -143,8 +185,8 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         image_url: mediaUrl,
         caption,
-        access_token: accessToken,
-      }),
+        access_token: accessToken
+      })
     });
 
     const createData = await safeParseJson(createRes);
@@ -158,8 +200,18 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `create_media_container: ${createErrorMessage}`,
+        errorMessage: `create_media_container: ${createErrorMessage}`
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
@@ -168,7 +220,7 @@ export async function POST(req: Request) {
           error: isTokenExpiredMessage(createErrorMessage)
             ? "Instagram access token expired. Reconnect account and update token in the active database record."
             : createErrorMessage,
-          meta: createData,
+          meta: createData
         },
         { status: isTokenExpiredMessage(createErrorMessage) ? 401 : 500 }
       );
@@ -182,15 +234,25 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: "Instagram creation_id missing",
+        errorMessage: "Instagram creation_id missing"
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
           success: false,
           step: "create_media_container",
           error: "Instagram creation_id missing",
-          meta: createData,
+          meta: createData
         },
         { status: 500 }
       );
@@ -203,8 +265,8 @@ export async function POST(req: Request) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           creation_id: creationId,
-          access_token: accessToken,
-        }),
+          access_token: accessToken
+        })
       }
     );
 
@@ -219,8 +281,18 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `publish_media: ${publishErrorMessage}`,
+        errorMessage: `publish_media: ${publishErrorMessage}`
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
@@ -229,7 +301,7 @@ export async function POST(req: Request) {
           error: isTokenExpiredMessage(publishErrorMessage)
             ? "Instagram access token expired. Reconnect account and update token in the active database record."
             : publishErrorMessage,
-          meta: publishData,
+          meta: publishData
         },
         { status: isTokenExpiredMessage(publishErrorMessage) ? 401 : 500 }
       );
@@ -243,15 +315,25 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: "Instagram publish succeeded but media ID is not available",
+        errorMessage: "Instagram publish succeeded but media ID is not available"
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
           success: false,
           step: "publish_media",
           error: "Instagram publish succeeded but media ID is not available",
-          meta: publishData,
+          meta: publishData
         },
         { status: 500 }
       );
@@ -259,15 +341,21 @@ export async function POST(req: Request) {
 
     const now = new Date().toISOString();
 
+    const updatePayload: Record<string, unknown> = {
+      publish_status: "published",
+      instagram_creation_id: creationId,
+      instagram_media_id: instagramMediaId,
+      updated_at: now,
+      published_at: now
+    };
+
+    if (scheduled_run) {
+      updatePayload.queue_status = "posted";
+    }
+
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("content_items")
-      .update({
-        publish_status: "published",
-        instagram_creation_id: creationId,
-        instagram_media_id: instagramMediaId,
-        updated_at: now,
-        published_at: now,
-      })
+      .update(updatePayload)
       .eq("id", id)
       .select("*")
       .single();
@@ -279,13 +367,13 @@ export async function POST(req: Request) {
         caption,
         status: "failed",
         instagramPostId: instagramMediaId,
-        errorMessage: `Published to Instagram, but failed to update content_items: ${updateError.message}`,
+        errorMessage: `Published to Instagram, but failed to update content_items: ${updateError.message}`
       }).catch(() => null);
 
       return NextResponse.json(
         {
           success: false,
-          error: updateError.message,
+          error: updateError.message
         },
         { status: 500 }
       );
@@ -296,14 +384,15 @@ export async function POST(req: Request) {
       mediaUrl,
       caption,
       status: "success",
-      instagramPostId: instagramMediaId,
+      instagramPostId: instagramMediaId
     });
 
     return NextResponse.json({
       success: true,
+      scheduled_run,
       instagramCreationId: creationId,
       instagramMediaId,
-      item: updated,
+      item: updated
     });
   } catch (err) {
     const errorMessage =
@@ -314,13 +403,13 @@ export async function POST(req: Request) {
       mediaUrl,
       caption,
       status: "failed",
-      errorMessage,
+      errorMessage
     }).catch(() => null);
 
     return NextResponse.json(
       {
         success: false,
-        error: errorMessage,
+        error: errorMessage
       },
       { status: 500 }
     );

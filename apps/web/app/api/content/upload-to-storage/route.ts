@@ -9,7 +9,13 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
-    const { id } = body;
+    const {
+      id,
+      scheduled_run = false
+    }: {
+      id?: string;
+      scheduled_run?: boolean;
+    } = body;
 
     contentItemId = id ?? null;
 
@@ -39,12 +45,32 @@ export async function POST(req: Request) {
       );
     }
 
+    if (item.public_image_url) {
+      return NextResponse.json({
+        success: true,
+        reused: true,
+        item,
+        publicUrl: item.public_image_url,
+        message: "Already uploaded to storage"
+      });
+    }
+
     if (!item.generated_image_url) {
       await logPostResult({
         contentItemId: id,
         status: "failed",
         errorMessage: "No generated image found. Generate image first."
       }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
 
       return NextResponse.json(
         {
@@ -62,6 +88,16 @@ export async function POST(req: Request) {
         errorMessage: "Generated image is not a base64 data URL"
       }).catch(() => null);
 
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
+
       return NextResponse.json(
         {
           success: false,
@@ -69,15 +105,6 @@ export async function POST(req: Request) {
         },
         { status: 400 }
       );
-    }
-
-    // prevent duplicate upload
-    if (item.public_image_url) {
-      return NextResponse.json({
-        success: true,
-        item,
-        message: "Already uploaded to storage"
-      });
     }
 
     const uploaded = await uploadGeneratedImageToStorage({
@@ -89,12 +116,14 @@ export async function POST(req: Request) {
 
     const now = new Date().toISOString();
 
+    const updatePayload: Record<string, unknown> = {
+      public_image_url: uploaded.publicUrl,
+      updated_at: now
+    };
+
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("content_items")
-      .update({
-        public_image_url: uploaded.publicUrl,
-        updated_at: now
-      })
+      .update(updatePayload)
       .eq("id", id)
       .select("*")
       .single();
@@ -107,13 +136,22 @@ export async function POST(req: Request) {
         errorMessage: `Uploaded to storage but failed to update DB: ${updateError.message}`
       }).catch(() => null);
 
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            queue_status: "failed",
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
+
       return NextResponse.json(
         { success: false, error: updateError.message },
         { status: 500 }
       );
     }
 
-    // optional success log (useful for pipeline tracing)
     await logPostResult({
       contentItemId: id,
       mediaUrl,
@@ -123,6 +161,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
+      reused: false,
       item: updated,
       publicUrl: uploaded.publicUrl
     });

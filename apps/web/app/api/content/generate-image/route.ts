@@ -6,14 +6,29 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+function buildPromptText(item: {
+  image_prompt?: string | null;
+  concept_title?: string | null;
+  visual_brief?: string | null;
+  on_image_text?: string | null;
+}) {
+  return (
+    item.image_prompt ||
+    `${item.concept_title ?? ""}. ${item.visual_brief ?? ""}. ${item.on_image_text ?? ""}`.trim()
+  );
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { id } = body;
+    const { id, force = false } = body as {
+      id?: string;
+      force?: boolean;
+    };
 
     if (!id) {
       return NextResponse.json(
-        { error: "Missing content item id" },
+        { success: false, error: "Missing content item id" },
         { status: 400 }
       );
     }
@@ -26,21 +41,41 @@ export async function POST(req: Request) {
 
     if (fetchError || !item) {
       return NextResponse.json(
-        { error: "Content item not found" },
+        { success: false, error: "Content item not found" },
         { status: 404 }
       );
     }
 
     if (item.prompt_status !== "approved") {
       return NextResponse.json(
-        { error: "Prompt must be approved before generating image" },
+        {
+          success: false,
+          error: "Prompt must be approved before generating image"
+        },
         { status: 400 }
       );
     }
 
-    const promptText =
-      item.image_prompt ||
-      `${item.concept_title}. ${item.visual_brief}. ${item.on_image_text}`;
+    if (item.generated_image_url && !force) {
+      return NextResponse.json({
+        success: true,
+        reused: true,
+        message: "Image already exists",
+        item
+      });
+    }
+
+    const promptText = buildPromptText(item);
+
+    if (!promptText) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Image prompt is empty"
+        },
+        { status: 400 }
+      );
+    }
 
     const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1-mini";
 
@@ -54,7 +89,7 @@ export async function POST(req: Request) {
 
     if (!firstImage) {
       return NextResponse.json(
-        { error: "No image returned from OpenAI" },
+        { success: false, error: "No image returned from OpenAI" },
         { status: 500 }
       );
     }
@@ -69,18 +104,24 @@ export async function POST(req: Request) {
 
     if (!generatedImageUrl) {
       return NextResponse.json(
-        { error: "OpenAI returned an image, but no usable URL/base64 payload was found" },
+        {
+          success: false,
+          error:
+            "OpenAI returned an image, but no usable URL/base64 payload was found"
+        },
         { status: 500 }
       );
     }
+
+    const now = new Date().toISOString();
 
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("content_items")
       .update({
         generated_image_url: generatedImageUrl,
-        render_status: "image_generated",
+        render_status: "rendered",
         image_prompt: promptText,
-        updated_at: new Date().toISOString()
+        updated_at: now
       })
       .eq("id", id)
       .select("*")
@@ -88,19 +129,23 @@ export async function POST(req: Request) {
 
     if (updateError) {
       return NextResponse.json(
-        { error: updateError.message },
+        { success: false, error: updateError.message },
         { status: 500 }
       );
     }
 
     return NextResponse.json({
       success: true,
+      reused: false,
       item: updated
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown generate image error";
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: message },
+      { status: 500 }
+    );
   }
 }
