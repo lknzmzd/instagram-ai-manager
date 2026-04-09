@@ -37,6 +37,40 @@ function isTokenExpiredMessage(message: string) {
   );
 }
 
+async function tryResolveMediaId(params: {
+  creationId: string;
+  accessToken: string;
+}) {
+  try {
+    const statusRes = await fetch(
+      `${GRAPH_URL}/${params.creationId}?fields=id,status_code&access_token=${encodeURIComponent(params.accessToken)}`,
+      {
+        method: "GET",
+        cache: "no-store"
+      }
+    );
+
+    const statusData = await safeParseJson(statusRes);
+
+    if (!statusRes.ok) {
+      return {
+        mediaId: null,
+        meta: statusData
+      };
+    }
+
+    return {
+      mediaId: statusData?.id ?? null,
+      meta: statusData
+    };
+  } catch {
+    return {
+      mediaId: null,
+      meta: null
+    };
+  }
+}
+
 export async function POST(req: Request) {
   let contentItemId: string | null = null;
   let mediaUrl: string | null = null;
@@ -307,36 +341,17 @@ export async function POST(req: Request) {
       );
     }
 
-    const instagramMediaId = publishData?.id;
+    let instagramMediaId = publishData?.id ?? null;
+    let resolveMeta: any = null;
 
     if (!instagramMediaId) {
-      await logPostResult({
-        contentItemId: id,
-        mediaUrl,
-        caption,
-        status: "failed",
-        errorMessage: "Instagram publish succeeded but media ID is not available"
-      }).catch(() => null);
+      const resolved = await tryResolveMediaId({
+        creationId,
+        accessToken
+      });
 
-      if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
-      }
-
-      return NextResponse.json(
-        {
-          success: false,
-          step: "publish_media",
-          error: "Instagram publish succeeded but media ID is not available",
-          meta: publishData
-        },
-        { status: 500 }
-      );
+      instagramMediaId = resolved.mediaId;
+      resolveMeta = resolved.meta;
     }
 
     const now = new Date().toISOString();
@@ -392,6 +407,9 @@ export async function POST(req: Request) {
       scheduled_run,
       instagramCreationId: creationId,
       instagramMediaId,
+      mediaIdResolvedLater: !publishData?.id && !!instagramMediaId,
+      mediaIdMissingButPublishAccepted: !publishData?.id && !instagramMediaId,
+      resolveMeta,
       item: updated
     });
   } catch (err) {
