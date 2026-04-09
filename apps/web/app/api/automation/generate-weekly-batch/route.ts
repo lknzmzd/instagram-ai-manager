@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
+import { POST as runGenerateBatch } from "../../content/generate-batch/route";
 
 const DEFAULT_PAGE_SLUG = "mortaena";
 const DEFAULT_GOAL = "growth";
@@ -89,22 +90,23 @@ function zonedLocalToUtcIso(
   );
 }
 
-async function callInternalJson(
-  req: NextRequest,
-  path: string,
-  payload: Record<string, unknown>
-) {
-  const origin = new URL(req.url).origin;
-
-  const res = await fetch(`${origin}${path}`, {
+async function callGenerateBatchDirect(payload: {
+  page_slug: string;
+  count: number;
+  goal: string;
+  auto_queue: boolean;
+  timezone: string;
+  start_date: string;
+}) {
+  const req = new Request("http://internal/api/content/generate-batch", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "content-type": "application/json"
     },
-    body: JSON.stringify(payload),
-    cache: "no-store"
+    body: JSON.stringify(payload)
   });
 
+  const res = await runGenerateBatch(req as unknown as NextRequest);
   const raw = await res.text();
 
   let data: any;
@@ -114,7 +116,7 @@ async function callInternalJson(
     data = { raw };
   }
 
-  return { res, data };
+  return { ok: res.ok, status: res.status, data };
 }
 
 export async function POST(req: NextRequest) {
@@ -256,20 +258,16 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const generated = await callInternalJson(
-      req,
-      "/api/content/generate-batch",
-      {
-        page_slug: pageSlug,
-        count: missingCount,
-        goal,
-        auto_queue: true,
-        timezone,
-        start_date: localStartDate
-      }
-    );
+    const generated = await callGenerateBatchDirect({
+      page_slug: pageSlug,
+      count: missingCount,
+      goal,
+      auto_queue: true,
+      timezone,
+      start_date: localStartDate
+    });
 
-    if (!generated.res.ok) {
+    if (!generated.ok) {
       return NextResponse.json(
         {
           success: false,
