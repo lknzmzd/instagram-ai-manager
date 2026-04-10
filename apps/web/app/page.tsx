@@ -139,7 +139,9 @@ export default function HomePage() {
   const [items, setItems] = useState<ContentItem[]>([]);
   const [logs, setLogs] = useState<PostLog[]>([]);
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [tokenHealth, setTokenHealth] = useState<InstagramTokenHealth | null>(null);
+  const [tokenHealth, setTokenHealth] = useState<InstagramTokenHealth | null>(
+    null
+  );
 
   const [loading, setLoading] = useState(true);
   const [loadingLogs, setLoadingLogs] = useState(true);
@@ -316,7 +318,9 @@ export default function HomePage() {
 
       const data = await safeJson(res);
 
-      if (!res.ok) throw new Error(data?.error || "Failed to update prompt status");
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to update prompt status");
+      }
 
       setItems((prev) =>
         prev.map((item) =>
@@ -541,7 +545,9 @@ export default function HomePage() {
         !!item.public_image_url
     ).length;
     const storageReady = items.filter((item) => !!item.public_image_url).length;
-    const published = items.filter((item) => item.publish_status === "published").length;
+    const published = items.filter(
+      (item) => item.publish_status === "published"
+    ).length;
 
     return {
       total,
@@ -556,12 +562,27 @@ export default function HomePage() {
 
   const queueStats = useMemo(() => {
     const total = queue.length;
+
     const ready = queue.filter((item) => item.queue_status === "ready").length;
-    const processing = queue.filter((item) => item.queue_status === "processing").length;
-    const posted = queue.filter((item) => item.queue_status === "posted").length;
+
+    const processing = queue.filter(
+      (item) => item.queue_status === "processing"
+    ).length;
+
+    const published = queue.filter(
+      (item) =>
+        item.queue_status === "posted" &&
+        item.publish_status === "published"
+    ).length;
+
+    const skipped = queue.filter(
+      (item) =>
+        item.publish_status === "skipped" || item.queue_status === "skipped"
+    ).length;
+
     const failed = queue.filter((item) => item.queue_status === "failed").length;
 
-    return { total, ready, processing, posted, failed };
+    return { total, ready, processing, published, skipped, failed };
   }, [queue]);
 
   function getStatusColor(status: string) {
@@ -574,7 +595,15 @@ export default function HomePage() {
   function getQueueColor(status: string | null) {
     if (status === "ready") return "#2563eb";
     if (status === "processing") return "#f59e0b";
-    if (status === "posted") return "#16a34a";
+    if (status === "posted") return "#6b7280";
+    if (status === "failed") return "#dc2626";
+    if (status === "skipped") return "#6b7280";
+    return "#444";
+  }
+
+  function getPublishStatusColor(status: string | null) {
+    if (status === "published") return "#7c3aed";
+    if (status === "skipped") return "#6b7280";
     if (status === "failed") return "#dc2626";
     return "#444";
   }
@@ -658,7 +687,12 @@ export default function HomePage() {
   }
 
   function getPreviewImage(item: ContentItem) {
-    return item.public_image_url || item.final_media_url || item.generated_image_url || null;
+    return (
+      item.public_image_url ||
+      item.final_media_url ||
+      item.generated_image_url ||
+      null
+    );
   }
 
   if (loading) {
@@ -691,7 +725,8 @@ export default function HomePage() {
       </h1>
 
       <div style={{ marginBottom: "24px", fontSize: "15px", opacity: 0.8 }}>
-        Content generation, approval, image production, storage upload, Instagram publishing, and automation tracking.
+        Content generation, approval, image production, storage upload,
+        Instagram publishing, and automation tracking.
       </div>
 
       {message && (
@@ -770,10 +805,12 @@ export default function HomePage() {
 
             <div style={{ fontSize: "14px", lineHeight: 1.7 }}>
               <div>
-                <strong>Account:</strong> {tokenHealth.accountName || "Unnamed account"}
+                <strong>Account:</strong>{" "}
+                {tokenHealth.accountName || "Unnamed account"}
               </div>
               <div>
-                <strong>Instagram Business ID:</strong> {tokenHealth.instagramBusinessId}
+                <strong>Instagram Business ID:</strong>{" "}
+                {tokenHealth.instagramBusinessId}
               </div>
               <div>
                 <strong>Expires At:</strong>{" "}
@@ -796,26 +833,26 @@ export default function HomePage() {
                 background: tokenHealth.isExpired
                   ? "#2a0d12"
                   : tokenHealth.shouldRefreshSoon
-                  ? "#2b1d08"
-                  : "#0d1f15",
+                    ? "#2b1d08"
+                    : "#0d1f15",
                 border: tokenHealth.isExpired
                   ? "1px solid #5b1d28"
                   : tokenHealth.shouldRefreshSoon
-                  ? "1px solid #6b4f1d"
-                  : "1px solid #1f5133",
+                    ? "1px solid #6b4f1d"
+                    : "1px solid #1f5133",
                 color: tokenHealth.isExpired
                   ? "#fecaca"
                   : tokenHealth.shouldRefreshSoon
-                  ? "#fde68a"
-                  : "#bbf7d0",
+                    ? "#fde68a"
+                    : "#bbf7d0",
                 fontSize: "14px"
               }}
             >
               {tokenHealth.isExpired
                 ? "Token is expired. Publishing may fail until you reconnect and store a new long-lived token."
                 : tokenHealth.shouldRefreshSoon
-                ? "Token is still working, but it should be refreshed soon."
-                : "Token looks healthy and does not need refresh yet."}
+                  ? "Token is still working, but it should be refreshed soon."
+                  : "Token looks healthy and does not need refresh yet."}
             </div>
           </div>
         )}
@@ -894,7 +931,8 @@ export default function HomePage() {
           {statCard("Queued Total", queueStats.total, "#ffffff")}
           {statCard("Ready", queueStats.ready, "#2563eb")}
           {statCard("Processing", queueStats.processing, "#f59e0b")}
-          {statCard("Posted", queueStats.posted, "#16a34a")}
+          {statCard("Published", queueStats.published, "#16a34a")}
+          {statCard("Skipped", queueStats.skipped, "#6b7280")}
           {statCard("Failed", queueStats.failed, "#dc2626")}
         </div>
 
@@ -923,9 +961,16 @@ export default function HomePage() {
                     alignItems: "center"
                   }}
                 >
-                  {pill(item.queue_status || "unknown", getQueueColor(item.queue_status))}
-                  {pill(item.publish_status || "not_published", item.publish_status === "published" ? "#7c3aed" : "#444")}
-                  {item.automation_batch_id && pill(item.automation_batch_id, "#334155")}
+                  {pill(
+                    item.queue_status || "unknown",
+                    getQueueColor(item.queue_status)
+                  )}
+                  {pill(
+                    item.publish_status || "not_published",
+                    getPublishStatusColor(item.publish_status)
+                  )}
+                  {item.automation_batch_id &&
+                    pill(item.automation_batch_id, "#334155")}
                 </div>
 
                 <div style={{ fontSize: "18px", fontWeight: 700, marginBottom: "8px" }}>
@@ -946,12 +991,28 @@ export default function HomePage() {
                       : "Not yet"}
                   </div>
                   <div>
-                    <strong>Status:</strong> {item.status || "unknown"} / {item.prompt_status || "unknown"}
+                    <strong>Status:</strong> {item.status || "unknown"} /{" "}
+                    {item.prompt_status || "unknown"}
                   </div>
                   <div>
-                    <strong>Instagram Media ID:</strong> {item.instagram_media_id || "—"}
+                    <strong>Instagram Media ID:</strong>{" "}
+                    {item.instagram_media_id || "—"}
                   </div>
                 </div>
+
+                {item.public_image_url && (
+                  <div style={{ fontSize: "12px", marginTop: "6px", opacity: 0.7 }}>
+                    <strong>Media:</strong>{" "}
+                    <a
+                      href={item.public_image_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: "#60a5fa" }}
+                    >
+                      Open media
+                    </a>
+                  </div>
+                )}
 
                 {item.caption && (
                   <div style={{ marginTop: "10px", fontSize: "14px", opacity: 0.9 }}>
@@ -1297,7 +1358,8 @@ export default function HomePage() {
       </div>
 
       <div style={{ marginBottom: "20px", fontSize: "14px", opacity: 0.8 }}>
-        Showing {filteredItems.length} item{filteredItems.length === 1 ? "" : "s"}
+        Showing {filteredItems.length} item
+        {filteredItems.length === 1 ? "" : "s"}
       </div>
 
       <div style={{ display: "grid", gap: "16px" }}>
@@ -1307,7 +1369,8 @@ export default function HomePage() {
             `${item.concept_title}. ${item.visual_brief}. ${item.on_image_text}`;
 
           const canGenerateImage = item.prompt_status === "approved";
-          const canUploadToStorage = !!item.generated_image_url && !item.public_image_url;
+          const canUploadToStorage =
+            !!item.generated_image_url && !item.public_image_url;
           const canSendToCanva = !!item.generated_image_url;
           const canPublish = item.status === "approved" && !!item.public_image_url;
           const isBusy = busyId === item.id;
@@ -1323,7 +1386,14 @@ export default function HomePage() {
                 background: "#0d0f14"
               }}
             >
-              <div style={{ marginBottom: "10px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <div
+                style={{
+                  marginBottom: "10px",
+                  display: "flex",
+                  gap: "8px",
+                  flexWrap: "wrap"
+                }}
+              >
                 {pill(item.status, getStatusColor(item.status))}
                 {pill(
                   item.prompt_status || "pending",
@@ -1446,7 +1516,11 @@ export default function HomePage() {
                   onClick={() => generateImage(item.id)}
                   disabled={!canGenerateImage || isBusy}
                   style={actionButtonStyle("#2563eb", !canGenerateImage || isBusy)}
-                  title={canGenerateImage ? "Generate image from approved prompt" : "Approve prompt first"}
+                  title={
+                    canGenerateImage
+                      ? "Generate image from approved prompt"
+                      : "Approve prompt first"
+                  }
                 >
                   {isBusy ? "Working..." : "Generate Image"}
                 </button>
@@ -1454,8 +1528,15 @@ export default function HomePage() {
                 <button
                   onClick={() => uploadToStorage(item.id)}
                   disabled={!canUploadToStorage || isBusy}
-                  style={actionButtonStyle("#f59e0b", !canUploadToStorage || isBusy)}
-                  title={canUploadToStorage ? "Upload image to public storage" : "Generate image first or already uploaded"}
+                  style={actionButtonStyle(
+                    "#f59e0b",
+                    !canUploadToStorage || isBusy
+                  )}
+                  title={
+                    canUploadToStorage
+                      ? "Upload image to public storage"
+                      : "Generate image first or already uploaded"
+                  }
                 >
                   {isBusy ? "Working..." : "Upload to Storage"}
                 </button>
@@ -1464,7 +1545,11 @@ export default function HomePage() {
                   onClick={() => sendToCanva(item.id)}
                   disabled={!canSendToCanva || isBusy}
                   style={actionButtonStyle("#14b8a6", !canSendToCanva || isBusy)}
-                  title={canSendToCanva ? "Send generated image to Canva" : "Generate image first"}
+                  title={
+                    canSendToCanva
+                      ? "Send generated image to Canva"
+                      : "Generate image first"
+                  }
                 >
                   {isBusy ? "Working..." : "Send to Canva"}
                 </button>
@@ -1473,7 +1558,11 @@ export default function HomePage() {
                   onClick={() => publishInstagram(item.id)}
                   disabled={!canPublish || isBusy}
                   style={actionButtonStyle("#7c3aed", !canPublish || isBusy)}
-                  title={canPublish ? "Publish to Instagram" : "Approve and upload image to storage first"}
+                  title={
+                    canPublish
+                      ? "Publish to Instagram"
+                      : "Approve and upload image to storage first"
+                  }
                 >
                   {isBusy ? "Working..." : "Publish Instagram"}
                 </button>
