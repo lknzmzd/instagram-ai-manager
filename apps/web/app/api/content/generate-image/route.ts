@@ -12,19 +12,38 @@ function buildPromptText(item: {
   visual_brief?: string | null;
   on_image_text?: string | null;
 }) {
-  return (
-    item.image_prompt ||
-    `${item.concept_title ?? ""}. ${item.visual_brief ?? ""}. ${item.on_image_text ?? ""}`.trim()
-  );
+  const parts = [
+    item.image_prompt?.trim(),
+    item.concept_title?.trim(),
+    item.visual_brief?.trim(),
+    item.on_image_text?.trim()
+  ].filter(Boolean);
+
+  return parts.join(". ").trim();
+}
+
+async function markImageFailure(id: string, errorMessage: string) {
+  await supabaseAdmin
+    .from("content_items")
+    .update({
+      render_status: "failed",
+      last_error: errorMessage,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", id);
 }
 
 export async function POST(req: Request) {
+  let contentItemId: string | null = null;
+
   try {
     const body = await req.json();
     const { id, force = false } = body as {
       id?: string;
       force?: boolean;
     };
+
+    contentItemId = id ?? null;
 
     if (!id) {
       return NextResponse.json(
@@ -68,6 +87,8 @@ export async function POST(req: Request) {
     const promptText = buildPromptText(item);
 
     if (!promptText) {
+      await markImageFailure(id, "Image prompt is empty");
+
       return NextResponse.json(
         {
           success: false,
@@ -77,17 +98,38 @@ export async function POST(req: Request) {
       );
     }
 
-    const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1-mini";
+    const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 
-    const imageResponse = await openai.images.generate({
-      model,
-      prompt: promptText,
-      size: "1024x1536"
-    });
+    let imageResponse: any;
 
-    const firstImage = imageResponse.data?.[0];
+    try {
+      imageResponse = await openai.images.generate({
+        model,
+        prompt: promptText,
+        size: "1024x1536"
+      });
+    } catch (apiError) {
+      const message =
+        apiError instanceof Error
+          ? apiError.message
+          : "OpenAI image generation request failed";
+
+      await markImageFailure(id, `OpenAI image generation failed: ${message}`);
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: `OpenAI image generation failed: ${message}`
+        },
+        { status: 500 }
+      );
+    }
+
+    const firstImage = imageResponse?.data?.[0];
 
     if (!firstImage) {
+      await markImageFailure(id, "No image returned from OpenAI");
+
       return NextResponse.json(
         { success: false, error: "No image returned from OpenAI" },
         { status: 500 }
@@ -103,6 +145,11 @@ export async function POST(req: Request) {
     }
 
     if (!generatedImageUrl) {
+      await markImageFailure(
+        id,
+        "OpenAI returned an image, but no usable URL/base64 payload was found"
+      );
+
       return NextResponse.json(
         {
           success: false,
@@ -121,6 +168,7 @@ export async function POST(req: Request) {
         generated_image_url: generatedImageUrl,
         render_status: "rendered",
         image_prompt: promptText,
+        last_error: null,
         updated_at: now
       })
       .eq("id", id)
@@ -128,6 +176,11 @@ export async function POST(req: Request) {
       .single();
 
     if (updateError) {
+      await markImageFailure(
+        id,
+        `Generated image but failed to save in DB: ${updateError.message}`
+      );
+
       return NextResponse.json(
         { success: false, error: updateError.message },
         { status: 500 }
@@ -142,6 +195,10 @@ export async function POST(req: Request) {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown generate image error";
+
+    if (contentItemId) {
+      await markImageFailure(contentItemId, message).catch(() => null);
+    }
 
     return NextResponse.json(
       { success: false, error: message },
