@@ -98,7 +98,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
+    const model = "gpt-image-1";
 
     let imageResponse: any;
 
@@ -106,7 +106,7 @@ export async function POST(req: Request) {
       imageResponse = await openai.images.generate({
         model,
         prompt: promptText,
-        size: "1024x1536"
+        size: "1024x1024"
       });
     } catch (apiError) {
       const message =
