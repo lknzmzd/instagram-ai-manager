@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { supabaseAdmin } from "@/lib/supabase";
+import { uploadGeneratedImageToStorage } from "@/lib/storage";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -75,11 +76,11 @@ export async function POST(req: Request) {
       );
     }
 
-    if (item.generated_image_url && !force) {
+    if (item.public_image_url && !force) {
       return NextResponse.json({
         success: true,
         reused: true,
-        message: "Image already exists",
+        message: "Public image already exists",
         item
       });
     }
@@ -137,14 +138,40 @@ export async function POST(req: Request) {
     }
 
     let generatedImageUrl: string | null = null;
+    let publicImageUrl: string | null = null;
 
     if ("b64_json" in firstImage && firstImage.b64_json) {
-      generatedImageUrl = `data:image/png;base64,${firstImage.b64_json}`;
+      const dataUrl = `data:image/png;base64,${firstImage.b64_json}`;
+
+      try {
+        const uploaded = await uploadGeneratedImageToStorage({
+          contentItemId: id,
+          dataUrl
+        });
+
+        publicImageUrl = uploaded.publicUrl;
+      } catch (uploadError) {
+        const message =
+          uploadError instanceof Error
+            ? uploadError.message
+            : "Failed to upload generated image to storage";
+
+        await markImageFailure(id, `Storage upload failed: ${message}`);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: `Storage upload failed: ${message}`
+          },
+          { status: 500 }
+        );
+      }
     } else if ("url" in firstImage && firstImage.url) {
       generatedImageUrl = firstImage.url;
+      publicImageUrl = firstImage.url;
     }
 
-    if (!generatedImageUrl) {
+    if (!publicImageUrl && !generatedImageUrl) {
       await markImageFailure(
         id,
         "OpenAI returned an image, but no usable URL/base64 payload was found"
@@ -166,6 +193,7 @@ export async function POST(req: Request) {
       .from("content_items")
       .update({
         generated_image_url: generatedImageUrl,
+        public_image_url: publicImageUrl,
         render_status: "rendered",
         image_prompt: promptText,
         last_error: null,
