@@ -101,38 +101,47 @@ export async function POST(req: Request) {
 
     const model = "gpt-image-1";
 
-    let imageResponse: any;
+    let imageResponse;
 
     try {
       imageResponse = await openai.images.generate({
-        model,
+        model: "gpt-image-1",
         prompt: promptText,
-        size: "1024x1024"
+        size: "1024x1536"
       });
-    } catch (apiError) {
-      const message =
-        apiError instanceof Error
-          ? apiError.message
-          : "OpenAI image generation request failed";
+      console.log("IMAGE RESPONSE:", JSON.stringify(imageResponse, null, 2));
+    } catch (err: any) {
+      console.error("OPENAI IMAGE ERROR:", err);
 
-      await markImageFailure(id, `OpenAI image generation failed: ${message}`);
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          last_error: err?.message || "OpenAI image generation failed",
+          queue_status: "failed",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", id);
 
       return NextResponse.json(
-        {
-          success: false,
-          error: `OpenAI image generation failed: ${message}`
-        },
+        { success: false, error: err.message },
         { status: 500 }
       );
     }
 
     const firstImage = imageResponse?.data?.[0];
 
-    if (!firstImage) {
-      await markImageFailure(id, "No image returned from OpenAI");
+    if (!firstImage || (!firstImage.b64_json && !firstImage.url)) {
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          last_error: "OpenAI returned empty image response",
+          queue_status: "failed",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", id);
 
       return NextResponse.json(
-        { success: false, error: "No image returned from OpenAI" },
+        { success: false, error: "No usable image returned" },
         { status: 500 }
       );
     }
