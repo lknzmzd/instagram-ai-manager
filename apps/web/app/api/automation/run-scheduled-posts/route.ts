@@ -9,6 +9,11 @@ function isAuthorized(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
   const cronSecret = process.env.CRON_SECRET;
 
+  // Allow local/dev runs without CRON_SECRET set. In production, require the secret.
+  if (process.env.NODE_ENV !== "production") {
+    return true;
+  }
+
   if (!cronSecret) return false;
   return authHeader === `Bearer ${cronSecret}`;
 }

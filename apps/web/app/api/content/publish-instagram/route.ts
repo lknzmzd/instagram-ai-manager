@@ -81,7 +81,10 @@ export async function POST(req: Request) {
     const { id, scheduled_run = false } = body as {
       id?: string;
       scheduled_run?: boolean;
+      debug?: boolean;
     };
+
+    const debug = (body as any)?.debug === true || process.env.NODE_ENV !== "production";
 
     contentItemId = id ?? null;
 
@@ -247,17 +250,20 @@ export async function POST(req: Request) {
           .eq("id", id);
       }
 
-      return NextResponse.json(
-        {
-          success: false,
-          step: "create_media_container",
-          error: isTokenExpiredMessage(createErrorMessage)
-            ? "Instagram access token expired. Reconnect account and update token in the active database record."
-            : createErrorMessage,
-          meta: createData
-        },
-        { status: isTokenExpiredMessage(createErrorMessage) ? 401 : 500 }
-      );
+      const payload: any = {
+        success: false,
+        step: "create_media_container",
+        error: isTokenExpiredMessage(createErrorMessage)
+          ? "Instagram access token expired. Reconnect account and update token in the active database record."
+          : createErrorMessage,
+        meta: sanitizeMeta(createData)
+      };
+
+      if (debug) payload.debugMeta = { create: sanitizeMeta(createData) };
+
+      return NextResponse.json(payload, {
+        status: isTokenExpiredMessage(createErrorMessage) ? 401 : 500
+      });
     }
 
     const creationId = createData?.id;
@@ -281,15 +287,16 @@ export async function POST(req: Request) {
           .eq("id", id);
       }
 
-      return NextResponse.json(
-        {
-          success: false,
-          step: "create_media_container",
-          error: "Instagram creation_id missing",
-          meta: createData
-        },
-        { status: 500 }
-      );
+      const payload: any = {
+        success: false,
+        step: "create_media_container",
+        error: "Instagram creation_id missing",
+        meta: sanitizeMeta(createData)
+      };
+
+      if (debug) payload.debugMeta = { create: sanitizeMeta(createData) };
+
+      return NextResponse.json(payload, { status: 500 });
     }
 
     const publishRes = await fetch(
@@ -328,17 +335,20 @@ export async function POST(req: Request) {
           .eq("id", id);
       }
 
-      return NextResponse.json(
-        {
-          success: false,
-          step: "publish_media",
-          error: isTokenExpiredMessage(publishErrorMessage)
-            ? "Instagram access token expired. Reconnect account and update token in the active database record."
-            : publishErrorMessage,
-          meta: publishData
-        },
-        { status: isTokenExpiredMessage(publishErrorMessage) ? 401 : 500 }
-      );
+      const payload: any = {
+        success: false,
+        step: "publish_media",
+        error: isTokenExpiredMessage(publishErrorMessage)
+          ? "Instagram access token expired. Reconnect account and update token in the active database record."
+          : publishErrorMessage,
+        meta: sanitizeMeta(publishData)
+      };
+
+      if (debug) payload.debugMeta = { publish: sanitizeMeta(publishData) };
+
+      return NextResponse.json(payload, {
+        status: isTokenExpiredMessage(publishErrorMessage) ? 401 : 500
+      });
     }
 
     let instagramMediaId = publishData?.id ?? null;
@@ -402,16 +412,26 @@ export async function POST(req: Request) {
       instagramPostId: instagramMediaId
     });
 
-    return NextResponse.json({
+    const successPayload: any = {
       success: true,
       scheduled_run,
       instagramCreationId: creationId,
       instagramMediaId,
       mediaIdResolvedLater: !publishData?.id && !!instagramMediaId,
       mediaIdMissingButPublishAccepted: !publishData?.id && !instagramMediaId,
-      resolveMeta,
+      resolveMeta: sanitizeMeta(resolveMeta),
       item: updated
-    });
+    };
+
+    if (debug) {
+      successPayload.debugMeta = {
+        create: sanitizeMeta(createData),
+        publish: sanitizeMeta(publishData),
+        resolve: sanitizeMeta(resolveMeta)
+      };
+    }
+
+    return NextResponse.json(successPayload);
   } catch (err) {
     const errorMessage =
       err instanceof Error ? err.message : "Unknown publish error";
@@ -444,4 +464,20 @@ function safeMeta(obj: unknown) {
       return "[unserializable meta]";
     }
   }
+}
+
+function sanitizeMeta(obj: any) {
+  if (!obj || typeof obj !== "object") return obj;
+  const clone: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof k === "string") {
+      const lk = k.toLowerCase();
+      if (lk.includes("access_token") || lk.includes("accesstoken") || lk === "token") {
+        clone[k] = "[redacted]";
+        continue;
+      }
+    }
+    clone[k] = v;
+  }
+  return clone;
 }

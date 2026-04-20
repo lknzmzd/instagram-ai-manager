@@ -110,6 +110,31 @@ export async function getActiveInstagramAccount(): Promise<InstagramAccountRow> 
     .single();
 
   if (error || !data) {
+    const envToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    const envBusinessId = process.env.INSTAGRAM_BUSINESS_ID;
+
+    if (envToken && envBusinessId) {
+      // Fallback for local/dev when DB record is not available
+      // eslint-disable-next-line no-console
+      console.warn(
+        "No active instagram account in DB — falling back to INSTAGRAM_ACCESS_TOKEN/INSTAGRAM_BUSINESS_ID from .env"
+      );
+
+      return {
+        id: "env-fallback",
+        account_name: null,
+        instagram_business_id: envBusinessId,
+        access_token: envToken,
+        token_type: "Bearer",
+        scopes: null,
+        expires_at: null,
+        last_refreshed_at: null,
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      } as InstagramAccountRow;
+    }
+
     throw new Error("No active Instagram account found");
   }
 
