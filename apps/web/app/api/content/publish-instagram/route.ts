@@ -234,7 +234,7 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `create_media_container: ${createErrorMessage}`
+        errorMessage: `create_media_container: ${createErrorMessage} | meta: ${safeMeta(createData)}`
       }).catch(() => null);
 
       if (scheduled_run) {
@@ -268,7 +268,7 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: "Instagram creation_id missing"
+        errorMessage: `Instagram creation_id missing | meta: ${safeMeta(createData)}`
       }).catch(() => null);
 
       if (scheduled_run) {
@@ -315,7 +315,7 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `publish_media: ${publishErrorMessage}`
+        errorMessage: `publish_media: ${publishErrorMessage} | meta: ${safeMeta(publishData)}`
       }).catch(() => null);
 
       if (scheduled_run) {
@@ -431,5 +431,17 @@ export async function POST(req: Request) {
       },
       { status: 500 }
     );
+  }
+}
+
+function safeMeta(obj: unknown) {
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    try {
+      return String(obj);
+    } catch {
+      return "[unserializable meta]";
+    }
   }
 }
