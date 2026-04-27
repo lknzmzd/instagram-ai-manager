@@ -1,24 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 
-const ALLOWED_LOCAL_HOURS = new Set([9, 12, 18]);
 const TIMEZONE = "Europe/Berlin";
-const MAX_RETRIES = 3;
+const ALLOWED_HOURS = new Set([9, 12, 18]);
 
 function isAuthorized(req: NextRequest) {
-  const authHeader = req.headers.get("authorization");
   const cronSecret = process.env.CRON_SECRET;
-
-  // Allow local/dev runs without CRON_SECRET set. In production, require the secret.
-  if (process.env.NODE_ENV !== "production") {
-    return true;
-  }
+  const authHeader = req.headers.get("authorization");
 
   if (!cronSecret) return false;
   return authHeader === `Bearer ${cronSecret}`;
 }
 
-function getBerlinNowParts(date = new Date()) {
+function getBerlinTime(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: TIMEZONE,
     year: "numeric",
@@ -67,51 +61,23 @@ async function callInternalJson(
     data = { raw };
   }
 
-  return { res, data };
+  return {
+    ok: res.ok,
+    status: res.status,
+    data
+  };
 }
 
-async function updateItem(
-  id: string,
-  patch: Record<string, unknown>
-) {
-  const { error } = await supabaseAdmin
+async function failItem(id: string, message: string) {
+  await supabaseAdmin
     .from("content_items")
     .update({
-      ...patch,
+      queue_status: "failed",
+      last_error: message,
+      retry_count: 1,
       updated_at: new Date().toISOString()
     })
     .eq("id", id);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-}
-
-async function getCurrentItem(id: string) {
-  const { data, error } = await supabaseAdmin
-    .from("content_items")
-    .select("*")
-    .eq("id", id)
-    .single();
-
-  if (error || !data) {
-    throw new Error("Failed to reload current item");
-  }
-
-  return data;
-}
-
-async function markFailed(id: string, errorMessage: string, currentRetryCount: number) {
-  const nextRetryCount = currentRetryCount + 1;
-
-  await updateItem(id, {
-    queue_status: "failed",
-    retry_count: nextRetryCount,
-    last_error: errorMessage,
-    last_retry_at: new Date().toISOString()
-  });
-
-  return nextRetryCount;
 }
 
 export async function POST(req: NextRequest) {
@@ -123,25 +89,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const now = new Date();
-    const berlin = getBerlinNowParts(now);
+    const berlin = getBerlinTime();
 
-    if (!ALLOWED_LOCAL_HOURS.has(berlin.hour)) {
+    if (!ALLOWED_HOURS.has(berlin.hour)) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        reason: "Current Berlin hour is not a publish slot",
+        reason: "Not a publish slot",
         berlin_time: berlin
       });
     }
 
-    const { data: candidate, error } = await supabaseAdmin
+    const now = new Date().toISOString();
+
+    const { data: item, error } = await supabaseAdmin
       .from("content_items")
       .select("*")
       .eq("queue_status", "ready")
       .neq("publish_status", "published")
       .not("scheduled_for", "is", null)
-      .lte("scheduled_for", now.toISOString())
+      .lte("scheduled_for", now)
       .order("scheduled_for", { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -153,175 +120,147 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!candidate) {
+    if (!item) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        reason: "No ready scheduled post found",
+        reason: "No due ready item",
         berlin_time: berlin
       });
     }
 
-    await updateItem(candidate.id, {
-      queue_status: "processing"
-    });
+    await supabaseAdmin
+      .from("content_items")
+      .update({
+        queue_status: "processing",
+        last_error: null,
+        updated_at: now
+      })
+      .eq("id", item.id);
 
-    let item = await getCurrentItem(candidate.id);
-    const currentRetryCount = Number(item.retry_count || 0);
+    let current = item;
 
-    if (currentRetryCount >= MAX_RETRIES) {
-      await updateItem(item.id, {
-        queue_status: "failed",
-        last_error: `Retry limit reached (${MAX_RETRIES})`
-      });
+    if (!current.public_image_url) {
+      const generated = await callInternalJson(
+        req,
+        "/api/content/generate-image",
+        { id: current.id }
+      );
 
-      return NextResponse.json({
-        success: false,
-        skipped: true,
-        reason: "Retry limit reached",
-        item_id: item.id,
-        retry_count: currentRetryCount
-      });
-    }
+      if (!generated.ok) {
+        const msg =
+          generated.data?.error ||
+          generated.data?.raw ||
+          "Failed to generate image";
 
-    if (item.status !== "approved" || item.prompt_status !== "approved") {
-      const { data: fixedItem, error: fixError } = await supabaseAdmin
-        .from("content_items")
-        .update({
-          status: "approved",
-          prompt_status: "approved",
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", item.id)
-        .select("*")
-        .single();
-
-      if (fixError || !fixedItem) {
-        const retryCount = await markFailed(
-          item.id,
-          fixError?.message || "Failed to prepare content item",
-          currentRetryCount
-        );
-
-        return NextResponse.json(
-          {
-            success: false,
-            step: "prepare_item",
-            error: fixError?.message || "Failed to prepare content item",
-            item_id: item.id,
-            retry_count: retryCount
-          },
-          { status: 500 }
-        );
-      }
-
-      item = fixedItem;
-    }
-
-    if (!item.generated_image_url) {
-      const generated = await callInternalJson(req, "/api/content/generate-image", {
-        id: item.id
-      });
-
-      if (!generated.res.ok) {
-        const retryCount = await markFailed(
-          item.id,
-          generated.data?.error || "Failed to generate image",
-          currentRetryCount
-        );
+        await failItem(current.id, String(msg));
 
         return NextResponse.json(
           {
             success: false,
             step: "generate_image",
-            error: generated.data?.error || "Failed to generate image",
-            item_id: item.id,
-            retry_count: retryCount,
+            item_id: current.id,
+            error: msg,
             meta: generated.data
           },
           { status: 500 }
         );
       }
 
-      item = await getCurrentItem(item.id);
-    }
+      const { data: refreshed, error: refreshError } = await supabaseAdmin
+        .from("content_items")
+        .select("*")
+        .eq("id", current.id)
+        .single();
 
-    if (!item.public_image_url) {
-      const uploaded = await callInternalJson(req, "/api/content/upload-to-storage", {
-        id: item.id,
-        scheduled_run: true
-      });
+      if (refreshError || !refreshed?.public_image_url) {
+        const msg = "Image generated but public_image_url is still missing";
 
-      if (!uploaded.res.ok) {
-        const retryCount = await markFailed(
-          item.id,
-          uploaded.data?.error || "Failed to upload to storage",
-          currentRetryCount
-        );
+        await failItem(current.id, msg);
 
         return NextResponse.json(
           {
             success: false,
-            step: "upload_to_storage",
-            error: uploaded.data?.error || "Failed to upload to storage",
-            item_id: item.id,
-            retry_count: retryCount,
-            meta: uploaded.data
+            step: "verify_public_image_url",
+            item_id: current.id,
+            error: msg
           },
           { status: 500 }
         );
       }
 
-      item = await getCurrentItem(item.id);
+      current = refreshed;
     }
 
     const published = await callInternalJson(
       req,
       "/api/content/publish-instagram",
       {
-        id: item.id,
+        id: current.id,
         scheduled_run: true
       }
     );
 
-    if (!published.res.ok) {
-      const retryCount = await markFailed(
-        item.id,
-        published.data?.error || "Failed to publish to Instagram",
-        currentRetryCount
-      );
+    if (!published.ok) {
+      const msg =
+        published.data?.error ||
+        published.data?.raw ||
+        "Failed to publish to Instagram";
+
+      await failItem(current.id, String(msg));
 
       return NextResponse.json(
         {
           success: false,
           step: "publish_instagram",
-          error: published.data?.error || "Failed to publish to Instagram",
-          item_id: item.id,
-          retry_count: retryCount,
+          item_id: current.id,
+          error: msg,
           meta: published.data
         },
         { status: 500 }
       );
     }
 
-    await updateItem(item.id, {
-      queue_status: "posted",
-      retry_count: 0,
-      last_error: null
-    });
+    const instagramMediaId =
+      published.data?.instagramMediaId ||
+      published.data?.item?.instagram_media_id ||
+      null;
 
-    const finalItem = await getCurrentItem(item.id);
+    if (!instagramMediaId) {
+      const msg = "Publish returned success but Instagram media ID is missing";
+
+      await failItem(current.id, msg);
+
+      return NextResponse.json(
+        {
+          success: false,
+          step: "verify_instagram_media_id",
+          item_id: current.id,
+          error: msg,
+          meta: published.data
+        },
+        { status: 500 }
+      );
+    }
+
+    await supabaseAdmin
+      .from("content_items")
+      .update({
+        queue_status: "posted",
+        publish_status: "published",
+        instagram_media_id: instagramMediaId,
+        last_error: null,
+        published_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", current.id);
 
     return NextResponse.json({
       success: true,
-      scheduled: true,
-      item_id: finalItem.id,
-      scheduled_for: finalItem.scheduled_for,
-      queue_status: finalItem.queue_status,
-      publish_status: finalItem.publish_status,
-      instagram_media_id: finalItem.instagram_media_id ?? null,
+      item_id: current.id,
+      instagramMediaId,
       berlin_time: berlin,
-      publish_result: published.data
+      result: published.data
     });
   } catch (error) {
     return NextResponse.json(
