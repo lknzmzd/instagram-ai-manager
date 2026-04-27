@@ -1,5 +1,3 @@
-// /lib/queue/processJob.ts
-
 import {
   generateImage,
   uploadToStorage,
@@ -8,7 +6,14 @@ import {
   publishPost
 } from "./steps";
 
-export async function processJob(item) {
+type ContentItem = {
+  id: string;
+  workflow_state?: string | null;
+  retry_count?: number | null;
+  public_image_url?: string | null;
+};
+
+export async function processJob(item: ContentItem) {
   switch (item.workflow_state) {
     case "approved":
       return generateImage(item);
@@ -26,6 +31,6 @@ export async function processJob(item) {
       return publishPost(item);
 
     default:
-      return;
+      return null;
   }
 }
