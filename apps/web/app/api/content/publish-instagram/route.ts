@@ -4,6 +4,8 @@ import { getValidInstagramCredentials } from "@/lib/instagramTokens";
 import { logPostResult } from "@/lib/logger";
 
 const GRAPH_URL = "https://graph.facebook.com/v24.0";
+const POLL_INTERVAL_MS = 4000;
+const MAX_POLLS = 15;
 
 async function safeParseJson(response: Response) {
   const raw = await response.text();
@@ -37,13 +39,69 @@ function isTokenExpiredMessage(message: string) {
   );
 }
 
+async function waitForContainerReady(params: {
+  creationId: string;
+  accessToken: string;
+}) {
+  for (let attempt = 1; attempt <= MAX_POLLS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+
+    const statusRes = await fetch(
+      `${GRAPH_URL}/${params.creationId}?fields=id,status_code&access_token=${encodeURIComponent(
+        params.accessToken
+      )}`,
+      {
+        method: "GET",
+        cache: "no-store"
+      }
+    );
+
+    const statusData = await safeParseJson(statusRes);
+
+    if (!statusRes.ok) {
+      return {
+        success: false,
+        status: "api_error",
+        error: statusData?.error?.message || "Container status check failed",
+        meta: statusData
+      };
+    }
+
+    if (statusData?.status_code === "FINISHED") {
+      return {
+        success: true,
+        status: "finished",
+        meta: statusData
+      };
+    }
+
+    if (statusData?.status_code === "ERROR") {
+      return {
+        success: false,
+        status: "error",
+        error: "Instagram container processing failed",
+        meta: statusData
+      };
+    }
+  }
+
+  return {
+    success: false,
+    status: "timeout",
+    error: "Timeout waiting for Instagram container to finish processing",
+    meta: null
+  };
+}
+
 async function tryResolveMediaId(params: {
   creationId: string;
   accessToken: string;
 }) {
   try {
     const statusRes = await fetch(
-      `${GRAPH_URL}/${params.creationId}?fields=id,status_code&access_token=${encodeURIComponent(params.accessToken)}`,
+      `${GRAPH_URL}/${params.creationId}?fields=id,status_code&access_token=${encodeURIComponent(
+        params.accessToken
+      )}`,
       {
         method: "GET",
         cache: "no-store"
@@ -71,6 +129,26 @@ async function tryResolveMediaId(params: {
   }
 }
 
+async function markScheduledFailure(params: {
+  id: string;
+  retryCount?: number | null;
+  errorMessage?: string;
+}) {
+  const retryCount = Number(params.retryCount ?? 0);
+
+  await supabaseAdmin
+    .from("content_items")
+    .update({
+      queue_status: "failed",
+      workflow_state: "failed",
+      last_error: params.errorMessage ?? "Publish failed",
+      retry_count: retryCount + 1,
+      next_run_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", params.id);
+}
+
 export async function POST(req: Request) {
   let contentItemId: string | null = null;
   let mediaUrl: string | null = null;
@@ -78,13 +156,15 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json();
+
     const { id, scheduled_run = false } = body as {
       id?: string;
       scheduled_run?: boolean;
       debug?: boolean;
     };
 
-    const debug = (body as any)?.debug === true || process.env.NODE_ENV !== "production";
+    const debug =
+      (body as any)?.debug === true || process.env.NODE_ENV !== "production";
 
     contentItemId = id ?? null;
 
@@ -114,6 +194,8 @@ export async function POST(req: Request) {
       );
     }
 
+    const retryCount = Number(item.retry_count ?? 0);
+
     if (item.publish_status === "published") {
       return NextResponse.json({
         success: true,
@@ -124,22 +206,22 @@ export async function POST(req: Request) {
     }
 
     if (item.status !== "approved") {
+      const errorMessage = `Only approved items can be published. Current status: ${item.status}`;
+
       await logPostResult({
         contentItemId: id,
         mediaUrl: item.public_image_url ?? null,
         caption: item.caption ?? null,
         status: "failed",
-        errorMessage: `Only approved items can be published. Current status: ${item.status}`
+        errorMessage
       }).catch(() => null);
 
       if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
+        await markScheduledFailure({
+          id,
+          retryCount,
+          errorMessage
+        });
       }
 
       return NextResponse.json(
@@ -156,27 +238,27 @@ export async function POST(req: Request) {
     }
 
     if (!item.public_image_url) {
+      const errorMessage = "No public image URL found. Upload to storage first.";
+
       await logPostResult({
         contentItemId: id,
         caption: item.caption ?? null,
         status: "failed",
-        errorMessage: "No public image URL found. Upload to storage first."
+        errorMessage
       }).catch(() => null);
 
       if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
+        await markScheduledFailure({
+          id,
+          retryCount,
+          errorMessage
+        });
       }
 
       return NextResponse.json(
         {
           success: false,
-          error: "No public image URL found. Upload to storage first."
+          error: errorMessage
         },
         { status: 400 }
       );
@@ -189,31 +271,43 @@ export async function POST(req: Request) {
       await getValidInstagramCredentials();
 
     if (!accessToken || !instagramBusinessId) {
+      const errorMessage = "Instagram credentials missing";
+
       await logPostResult({
         contentItemId: id,
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: "Instagram credentials missing"
+        errorMessage
       }).catch(() => null);
 
       if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
+        await markScheduledFailure({
+          id,
+          retryCount,
+          errorMessage
+        });
       }
 
       return NextResponse.json(
         {
           success: false,
-          error: "Instagram credentials missing"
+          error: errorMessage
         },
         { status: 500 }
       );
+    }
+
+    if (scheduled_run) {
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          queue_status: "processing",
+          workflow_state: "uploaded",
+          last_error: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", id);
     }
 
     const createRes = await fetch(`${GRAPH_URL}/${instagramBusinessId}/media`, {
@@ -237,17 +331,17 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `create_media_container: ${createErrorMessage} | meta: ${safeMeta(createData)}`
+        errorMessage: `create_media_container: ${createErrorMessage} | meta: ${safeMeta(
+          createData
+        )}`
       }).catch(() => null);
 
       if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
+        await markScheduledFailure({
+          id,
+          retryCount,
+          errorMessage: createErrorMessage
+        });
       }
 
       const payload: any = {
@@ -269,28 +363,28 @@ export async function POST(req: Request) {
     const creationId = createData?.id;
 
     if (!creationId) {
+      const errorMessage = "Instagram creation_id missing";
+
       await logPostResult({
         contentItemId: id,
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `Instagram creation_id missing | meta: ${safeMeta(createData)}`
+        errorMessage: `${errorMessage} | meta: ${safeMeta(createData)}`
       }).catch(() => null);
 
       if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
+        await markScheduledFailure({
+          id,
+          retryCount,
+          errorMessage
+        });
       }
 
       const payload: any = {
         success: false,
         step: "create_media_container",
-        error: "Instagram creation_id missing",
+        error: errorMessage,
         meta: sanitizeMeta(createData)
       };
 
@@ -298,6 +392,74 @@ export async function POST(req: Request) {
 
       return NextResponse.json(payload, { status: 500 });
     }
+
+    await supabaseAdmin
+      .from("content_items")
+      .update({
+        workflow_state: "container_created",
+        container_id: creationId,
+        instagram_creation_id: creationId,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id);
+
+    const waitResult = await waitForContainerReady({
+      creationId,
+      accessToken
+    });
+
+    if (!waitResult.success) {
+      const waitError =
+        waitResult.error || "Instagram container was not ready for publishing";
+
+      await logPostResult({
+        contentItemId: id,
+        mediaUrl,
+        caption,
+        status: "failed",
+        errorMessage: `wait_for_container: ${waitError} | meta: ${safeMeta(
+          waitResult.meta
+        )}`
+      }).catch(() => null);
+
+      if (scheduled_run) {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            workflow_state: "container_created",
+            queue_status: "retry",
+            last_error: waitError,
+            retry_count: retryCount + 1,
+            next_run_at: new Date(Date.now() + 60 * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", id);
+      }
+
+      const payload: any = {
+        success: false,
+        step: "wait_for_container",
+        error: waitError,
+        meta: sanitizeMeta(waitResult.meta)
+      };
+
+      if (debug) {
+        payload.debugMeta = {
+          create: sanitizeMeta(createData),
+          wait: sanitizeMeta(waitResult.meta)
+        };
+      }
+
+      return NextResponse.json(payload, { status: 500 });
+    }
+
+    await supabaseAdmin
+      .from("content_items")
+      .update({
+        workflow_state: "container_ready",
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id);
 
     const publishRes = await fetch(
       `${GRAPH_URL}/${instagramBusinessId}/media_publish`,
@@ -322,17 +484,17 @@ export async function POST(req: Request) {
         mediaUrl,
         caption,
         status: "failed",
-        errorMessage: `publish_media: ${publishErrorMessage} | meta: ${safeMeta(publishData)}`
+        errorMessage: `publish_media: ${publishErrorMessage} | meta: ${safeMeta(
+          publishData
+        )}`
       }).catch(() => null);
 
       if (scheduled_run) {
-        await supabaseAdmin
-          .from("content_items")
-          .update({
-            queue_status: "failed",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", id);
+        await markScheduledFailure({
+          id,
+          retryCount,
+          errorMessage: publishErrorMessage
+        });
       }
 
       const payload: any = {
@@ -368,15 +530,15 @@ export async function POST(req: Request) {
 
     const updatePayload: Record<string, unknown> = {
       publish_status: "published",
+      workflow_state: "published",
+      queue_status: scheduled_run ? "posted" : item.queue_status ?? null,
       instagram_creation_id: creationId,
+      container_id: creationId,
       instagram_media_id: instagramMediaId,
+      last_error: null,
       updated_at: now,
       published_at: now
     };
-
-    if (scheduled_run) {
-      updatePayload.queue_status = "posted";
-    }
 
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("content_items")
@@ -426,6 +588,7 @@ export async function POST(req: Request) {
     if (debug) {
       successPayload.debugMeta = {
         create: sanitizeMeta(createData),
+        wait: sanitizeMeta(waitResult.meta),
         publish: sanitizeMeta(publishData),
         resolve: sanitizeMeta(resolveMeta)
       };
@@ -468,16 +631,25 @@ function safeMeta(obj: unknown) {
 
 function sanitizeMeta(obj: any) {
   if (!obj || typeof obj !== "object") return obj;
+
   const clone: Record<string, any> = {};
+
   for (const [k, v] of Object.entries(obj)) {
     if (typeof k === "string") {
       const lk = k.toLowerCase();
-      if (lk.includes("access_token") || lk.includes("accesstoken") || lk === "token") {
+
+      if (
+        lk.includes("access_token") ||
+        lk.includes("accesstoken") ||
+        lk === "token"
+      ) {
         clone[k] = "[redacted]";
         continue;
       }
     }
+
     clone[k] = v;
   }
+
   return clone;
 }
