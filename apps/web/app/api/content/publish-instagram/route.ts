@@ -4,8 +4,8 @@ import { getValidInstagramCredentials } from "@/lib/instagramTokens";
 import { logPostResult } from "@/lib/logger";
 
 const GRAPH_URL = "https://graph.facebook.com/v24.0";
-const POLL_INTERVAL_MS = 4000;
-const MAX_POLLS = 15;
+const POLL_INTERVAL_MS = 2000;
+const MAX_POLLS = 8;
 
 async function safeParseJson(response: Response) {
   const raw = await response.text();
