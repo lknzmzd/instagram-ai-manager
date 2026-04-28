@@ -1,29 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
+import { runPublishFlow } from "@/lib/instagram/publishFlow";
 
 function isAuthorized(req: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   const authHeader = req.headers.get("authorization");
   return !!cronSecret && authHeader === `Bearer ${cronSecret}`;
-}
-
-async function call(req: NextRequest, path: string, payload: any) {
-  const origin = new URL(req.url).origin;
-
-  const res = await fetch(`${origin}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store"
-  });
-
-  const text = await res.text();
-
-  try {
-    return { ok: res.ok, status: res.status, data: JSON.parse(text) };
-  } catch {
-    return { ok: res.ok, status: res.status, data: { raw: text } };
-  }
 }
 
 export async function POST(req: NextRequest) {
@@ -56,27 +38,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        version: "V2_SKIP_IMAGE",
-        reason: "No publish-ready item found. Need public_image_url first."
+        version: "V3_DIRECT_FLOW",
+        reason: "No publish-ready item"
       });
     }
 
-    const res = await call(req, "/api/content/publish-instagram", {
-      id: item.id
-    });
+    const result = await runPublishFlow(item, supabaseAdmin);
 
     return NextResponse.json({
       success: true,
-      version: "V2_SKIP_IMAGE",
-      step: "instagram_flow",
+      version: "V3_DIRECT_FLOW",
       item_id: item.id,
-      result: res.data
+      result
     });
+
   } catch (err) {
     return NextResponse.json(
       {
         success: false,
-        version: "V2_SKIP_IMAGE",
+        version: "V3_DIRECT_FLOW",
         error: err instanceof Error ? err.message : "Unknown error"
       },
       { status: 500 }
