@@ -73,17 +73,51 @@ export async function POST(req: NextRequest) {
 
     const now = new Date().toISOString();
 
+    if (item.workflow_state === "draft") {
+      const origin = new URL(req.url).origin;
+
+      const res = await fetch(`${origin}/api/content/generate-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: item.id }),
+        cache: "no-store"
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Image generation failed");
+      }
+
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          workflow_state: "uploaded",
+          queue_status: "queued",
+          next_run_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", item.id);
+
+      return NextResponse.json({
+        success: true,
+        item_id: item.id,
+        result: {
+          step: "generate_image",
+          next: "uploaded"
+        }
+      });
+    }
+
     const { data: item, error } = await supabaseAdmin
       .from("content_items")
       .select("*")
       .neq("publish_status", "published")
       .in("workflow_state", [
-        "approved",
-        "image_generated",
+        "draft",
         "uploaded",
         "container_created",
-        "container_ready",
-        "failed"
+        "container_ready"
       ])
       .or(`next_run_at.is.null,next_run_at.lte.${now}`)
       .order("scheduled_for", { ascending: true, nullsFirst: false })
