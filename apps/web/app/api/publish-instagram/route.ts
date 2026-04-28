@@ -8,10 +8,7 @@ export async function POST(req: Request) {
     const { id } = await req.json();
 
     if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Missing id" },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: "Missing id" }, { status: 400 });
     }
 
     const { data: item, error } = await supabaseAdmin
@@ -20,104 +17,121 @@ export async function POST(req: Request) {
       .eq("id", id)
       .single();
 
-    if (error || !item) {
-      throw new Error("Item not found");
-    }
-
-    if (!item.public_image_url) {
-      throw new Error("No image to publish");
-    }
+    if (error || !item) throw new Error("Item not found");
 
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN!;
     const igUserId = process.env.INSTAGRAM_USER_ID!;
 
-    // STEP 1: Create media container
-    const containerRes = await fetch(
-      `${GRAPH_URL}/${igUserId}/media`,
-      {
+    // =========================================
+    // STEP 1: CREATE CONTAINER
+    // =========================================
+    if (!item.container_id) {
+      const res = await fetch(`${GRAPH_URL}/${igUserId}/media`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           image_url: item.public_image_url,
           caption: item.caption || "",
           access_token: accessToken
         })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error?.message || "Create container failed");
       }
-    );
 
-    const containerData = await containerRes.json();
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          container_id: data.id,
+          workflow_state: "container_created",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", id);
 
-    if (!containerRes.ok) {
-      throw new Error(
-        containerData.error?.message || "Failed to create container"
-      );
+      return NextResponse.json({
+        success: true,
+        step: "container_created"
+      });
     }
 
-    const creationId = containerData.id;
-
-    // STEP 2: Poll until ready (IMPORTANT)
-    let attempts = 0;
-    let status = "IN_PROGRESS";
-
-    while (status !== "FINISHED" && attempts < 10) {
-      await new Promise((r) => setTimeout(r, 3000));
-
-      const statusRes = await fetch(
-        `${GRAPH_URL}/${creationId}?fields=status_code&access_token=${accessToken}`
+    // =========================================
+    // STEP 2: CHECK STATUS
+    // =========================================
+    if (item.workflow_state === "container_created") {
+      const res = await fetch(
+        `${GRAPH_URL}/${item.container_id}?fields=status_code&access_token=${accessToken}`
       );
 
-      const statusData = await statusRes.json();
-      status = statusData.status_code;
+      const data = await res.json();
+      const status = data.status_code;
 
       if (status === "ERROR") {
-        throw new Error("Container processing failed");
+        throw new Error("Container failed");
       }
 
-      attempts++;
+      if (status !== "FINISHED") {
+        return NextResponse.json({
+          success: true,
+          step: "waiting_container"
+        });
+      }
+
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          workflow_state: "container_ready",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", id);
+
+      return NextResponse.json({
+        success: true,
+        step: "container_ready"
+      });
     }
 
-    if (status !== "FINISHED") {
-      throw new Error("Container timeout");
-    }
-
-    // STEP 3: Publish
-    const publishRes = await fetch(
-      `${GRAPH_URL}/${igUserId}/media_publish`,
-      {
+    // =========================================
+    // STEP 3: PUBLISH
+    // =========================================
+    if (item.workflow_state === "container_ready") {
+      const res = await fetch(`${GRAPH_URL}/${igUserId}/media_publish`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          creation_id: creationId,
+          creation_id: item.container_id,
           access_token: accessToken
         })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error?.message || "Publish failed");
       }
-    );
 
-    const publishData = await publishRes.json();
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          publish_status: "published",
+          instagram_media_id: data.id,
+          workflow_state: "published",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", id);
 
-    if (!publishRes.ok) {
-      throw new Error(
-        publishData.error?.message || "Publish failed"
-      );
+      return NextResponse.json({
+        success: true,
+        step: "published",
+        media_id: data.id
+      });
     }
-
-    // STEP 4: Update DB
-    await supabaseAdmin
-      .from("content_items")
-      .update({
-        publish_status: "published",
-        instagram_media_id: publishData.id,
-        workflow_state: "published"
-      })
-      .eq("id", id);
 
     return NextResponse.json({
       success: true,
-      media_id: publishData.id
+      message: "No action needed"
     });
 
   } catch (err) {
