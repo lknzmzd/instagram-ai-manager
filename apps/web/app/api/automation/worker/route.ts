@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
+import { runPublishFlow } from "@/lib/instagram/publishFlow";
 
 function isAuthorized(req: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -17,11 +18,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const now = new Date().toISOString();
+
     const { data: item, error } = await supabaseAdmin
       .from("content_items")
       .select("*")
       .neq("publish_status", "published")
       .not("public_image_url", "is", null)
+      .or(`next_run_at.is.null,next_run_at.lte.${now}`)
       .order("scheduled_for", { ascending: true, nullsFirst: false })
       .order("created_at", { ascending: true })
       .limit(1)
@@ -38,61 +42,60 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        version: "V4_FIRE_AND_FORGET",
+        version: "V5_DIRECT_FLOW",
         reason: "No publish-ready item found"
       });
     }
-
-    const origin = new URL(req.url).origin;
 
     await supabaseAdmin
       .from("content_items")
       .update({
         queue_status: "processing",
         last_error: null,
-        updated_at: new Date().toISOString()
+        updated_at: now
       })
       .eq("id", item.id);
 
-    // Fire-and-forget: do NOT await the publish response.
-    // This prevents Cloudflare 522 timeout from the worker route.
-    fetch(`${origin}/api/content/publish-instagram`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        id: item.id,
-        scheduled_run: true,
-        debug: true
-      }),
-      cache: "no-store"
-    }).catch(async (err) => {
+    try {
+      const result = await runPublishFlow(item, supabaseAdmin);
+
+      return NextResponse.json({
+        success: true,
+        version: "V5_DIRECT_FLOW",
+        item_id: item.id,
+        result
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown publish flow error";
+
       await supabaseAdmin
         .from("content_items")
         .update({
-          queue_status: "failed",
           workflow_state: "failed",
-          last_error:
-            err instanceof Error ? err.message : "Fire-and-forget publish failed",
+          queue_status: "failed",
+          last_error: message,
           retry_count: Number(item.retry_count ?? 0) + 1,
           next_run_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           updated_at: new Date().toISOString()
         })
         .eq("id", item.id);
-    });
 
-    return NextResponse.json({
-      success: true,
-      version: "V4_FIRE_AND_FORGET",
-      step: "publish_triggered",
-      item_id: item.id
-    });
+      return NextResponse.json(
+        {
+          success: false,
+          version: "V5_DIRECT_FLOW",
+          item_id: item.id,
+          error: message
+        },
+        { status: 500 }
+      );
+    }
   } catch (err) {
     return NextResponse.json(
       {
         success: false,
-        version: "V4_FIRE_AND_FORGET",
+        version: "V5_DIRECT_FLOW",
         error: err instanceof Error ? err.message : "Unknown worker error"
       },
       { status: 500 }
