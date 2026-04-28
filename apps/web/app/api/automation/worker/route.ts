@@ -9,6 +9,29 @@ function isAuthorized(req: NextRequest) {
   return !!cronSecret && authHeader === `Bearer ${cronSecret}`;
 }
 
+function getBerlinTimeHHMM(date: Date) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Berlin",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function isPublishSlot(berlinTime: string) {
+  const allowedSlots = ["09:00", "15:00", "21:00"];
+
+  const [nowHour, nowMinute] = berlinTime.split(":").map(Number);
+  const nowTotal = nowHour * 60 + nowMinute;
+
+  return allowedSlots.some((slot) => {
+    const [slotHour, slotMinute] = slot.split(":").map(Number);
+    const slotTotal = slotHour * 60 + slotMinute;
+
+    return nowTotal >= slotTotal && nowTotal < slotTotal + 5;
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     if (!isAuthorized(req)) {
@@ -18,14 +41,29 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const nowIso = nowDate.toISOString();
+    const berlinTime = getBerlinTimeHHMM(nowDate);
+    const allowedSlots = ["09:00", "15:00", "21:00"];
+
+    if (!isPublishSlot(berlinTime)) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        version: "V6_3_POSTS_PER_DAY",
+        reason: "Not a publish slot",
+        berlin_time: berlinTime,
+        allowed_slots: allowedSlots
+      });
+    }
 
     const { data: item, error } = await supabaseAdmin
       .from("content_items")
       .select("*")
+      .eq("status", "approved")
       .neq("publish_status", "published")
       .not("public_image_url", "is", null)
-      .or(`next_run_at.is.null,next_run_at.lte.${now}`)
+      .or(`next_run_at.is.null,next_run_at.lte.${nowIso}`)
       .order("scheduled_for", { ascending: true, nullsFirst: false })
       .order("created_at", { ascending: true })
       .limit(1)
@@ -33,7 +71,11 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       return NextResponse.json(
-        { success: false, error: error.message },
+        {
+          success: false,
+          version: "V6_3_POSTS_PER_DAY",
+          error: error.message
+        },
         { status: 500 }
       );
     }
@@ -42,8 +84,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        version: "V5_DIRECT_FLOW",
-        reason: "No publish-ready item found"
+        version: "V6_3_POSTS_PER_DAY",
+        reason: "No publish-ready item found",
+        berlin_time: berlinTime
       });
     }
 
@@ -63,7 +106,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        version: "V5_DIRECT_FLOW",
+        version: "V6_3_POSTS_PER_DAY",
         item_id: item.id,
         reason: "Retry limit reached"
       });
@@ -74,7 +117,7 @@ export async function POST(req: NextRequest) {
       .update({
         queue_status: "processing",
         last_error: null,
-        updated_at: now
+        updated_at: new Date().toISOString()
       })
       .eq("id", item.id);
 
@@ -83,7 +126,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         success: true,
-        version: "V5_DIRECT_FLOW",
+        version: "V6_3_POSTS_PER_DAY",
         item_id: item.id,
         result
       });
@@ -106,7 +149,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          version: "V5_DIRECT_FLOW",
+          version: "V6_3_POSTS_PER_DAY",
           item_id: item.id,
           error: message
         },
@@ -117,7 +160,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        version: "V5_DIRECT_FLOW",
+        version: "V6_3_POSTS_PER_DAY",
         error: err instanceof Error ? err.message : "Unknown worker error"
       },
       { status: 500 }
