@@ -109,10 +109,18 @@ export async function POST(req: NextRequest) {
         cache: "no-store"
       });
 
-      const data = await res.json();
+      const raw = await res.text();
+
+      let data: any;
+
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = { raw };
+      }
 
       if (!res.ok) {
-        throw new Error(data?.error || "Image generation failed");
+        throw new Error(data?.error || data?.raw || "Image generation failed");
       }
 
       await supabaseAdmin
