@@ -73,6 +73,32 @@ export async function POST(req: NextRequest) {
 
     const now = new Date().toISOString();
 
+    const { data: item, error } = await supabaseAdmin
+      .from("content_items")
+      .select("*")
+      .neq("publish_status", "published")
+      .in("workflow_state", [
+        "draft",
+        "uploaded",
+        "container_created",
+        "container_ready"
+      ])
+      .or(`next_run_at.is.null,next_run_at.lte.${now}`)
+      .order("scheduled_for", { ascending: true, nullsFirst: false })
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: error.message
+        },
+        { status: 500 }
+      );
+    }
+
     if (item.workflow_state === "draft") {
       const origin = new URL(req.url).origin;
 
@@ -107,32 +133,6 @@ export async function POST(req: NextRequest) {
           next: "uploaded"
         }
       });
-    }
-
-    const { data: item, error } = await supabaseAdmin
-      .from("content_items")
-      .select("*")
-      .neq("publish_status", "published")
-      .in("workflow_state", [
-        "draft",
-        "uploaded",
-        "container_created",
-        "container_ready"
-      ])
-      .or(`next_run_at.is.null,next_run_at.lte.${now}`)
-      .order("scheduled_for", { ascending: true, nullsFirst: false })
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: error.message
-        },
-        { status: 500 }
-      );
     }
 
     console.log("WORKER_SELECTED_ITEM", item);
