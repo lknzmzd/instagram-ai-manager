@@ -39,14 +39,6 @@ export async function POST(req: NextRequest) {
       .limit(1)
       .maybeSingle();
 
-    if (!item) {
-      return NextResponse.json({
-        success: true,
-        skipped: true,
-        reason: "No items"
-      });
-    }
-
     // =========================================
     // STEP 1: IMAGE
     // =========================================
