@@ -47,6 +47,28 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    const retryCount = Number(item.retry_count ?? 0);
+
+    if (retryCount >= 5) {
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          workflow_state: "permanently_failed",
+          queue_status: "permanently_failed",
+          last_error: item.last_error || "Retry limit reached",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", item.id);
+
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        version: "V5_DIRECT_FLOW",
+        item_id: item.id,
+        reason: "Retry limit reached"
+      });
+    }
+
     await supabaseAdmin
       .from("content_items")
       .update({
@@ -75,7 +97,7 @@ export async function POST(req: NextRequest) {
           workflow_state: "failed",
           queue_status: "failed",
           last_error: message,
-          retry_count: Number(item.retry_count ?? 0) + 1,
+          retry_count: retryCount + 1,
           next_run_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           updated_at: new Date().toISOString()
         })
