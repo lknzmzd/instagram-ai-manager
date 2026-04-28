@@ -15,7 +15,7 @@ export async function runPublishFlow(
   const GRAPH_URL = "https://graph.facebook.com/v24.0";
 
   const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN!;
-  const igUserId = process.env.INSTAGRAM_USER_ID!;
+  const igUserId = process.env.INSTAGRAM_BUSINESS_ID!;
   const now = new Date().toISOString();
 
   if (!item.public_image_url) {
