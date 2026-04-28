@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { runPublishFlow } from "@/lib/instagram/publishFlow";
 
 function isAuthorized(req: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   const authHeader = req.headers.get("authorization");
+
   return !!cronSecret && authHeader === `Bearer ${cronSecret}`;
 }
 
@@ -38,26 +38,62 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         skipped: true,
-        version: "V3_DIRECT_FLOW",
-        reason: "No publish-ready item"
+        version: "V4_FIRE_AND_FORGET",
+        reason: "No publish-ready item found"
       });
     }
 
-    const result = await runPublishFlow(item, supabaseAdmin);
+    const origin = new URL(req.url).origin;
+
+    await supabaseAdmin
+      .from("content_items")
+      .update({
+        queue_status: "processing",
+        last_error: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", item.id);
+
+    // Fire-and-forget: do NOT await the publish response.
+    // This prevents Cloudflare 522 timeout from the worker route.
+    fetch(`${origin}/api/content/publish-instagram`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        id: item.id,
+        scheduled_run: true,
+        debug: true
+      }),
+      cache: "no-store"
+    }).catch(async (err) => {
+      await supabaseAdmin
+        .from("content_items")
+        .update({
+          queue_status: "failed",
+          workflow_state: "failed",
+          last_error:
+            err instanceof Error ? err.message : "Fire-and-forget publish failed",
+          retry_count: Number(item.retry_count ?? 0) + 1,
+          next_run_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", item.id);
+    });
 
     return NextResponse.json({
       success: true,
-      version: "V3_DIRECT_FLOW",
-      item_id: item.id,
-      result
+      version: "V4_FIRE_AND_FORGET",
+      step: "publish_triggered",
+      item_id: item.id
     });
-
   } catch (err) {
     return NextResponse.json(
       {
         success: false,
-        version: "V3_DIRECT_FLOW",
-        error: err instanceof Error ? err.message : "Unknown error"
+        version: "V4_FIRE_AND_FORGET",
+        error: err instanceof Error ? err.message : "Unknown worker error"
       },
       { status: 500 }
     );
