@@ -8,7 +8,10 @@ export async function POST(req: Request) {
     const { id } = await req.json();
 
     if (!id) {
-      return NextResponse.json({ success: false, error: "Missing id" }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: "Missing id" },
+        { status: 400 }
+      );
     }
 
     const { data: item, error } = await supabaseAdmin
@@ -19,8 +22,21 @@ export async function POST(req: Request) {
 
     if (error || !item) throw new Error("Item not found");
 
+    if (item.publish_status === "published") {
+      return NextResponse.json({
+        success: true,
+        step: "already_published"
+      });
+    }
+
+    if (!item.public_image_url) {
+      throw new Error("Missing public_image_url");
+    }
+
     const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN!;
     const igUserId = process.env.INSTAGRAM_USER_ID!;
+
+    const now = new Date().toISOString();
 
     // =========================================
     // STEP 1: CREATE CONTAINER
@@ -47,7 +63,8 @@ export async function POST(req: Request) {
         .update({
           container_id: data.id,
           workflow_state: "container_created",
-          updated_at: new Date().toISOString()
+          next_run_at: new Date(Date.now() + 60 * 1000).toISOString(),
+          updated_at: now
         })
         .eq("id", id);
 
@@ -73,6 +90,14 @@ export async function POST(req: Request) {
       }
 
       if (status !== "FINISHED") {
+        await supabaseAdmin
+          .from("content_items")
+          .update({
+            next_run_at: new Date(Date.now() + 60 * 1000).toISOString(),
+            updated_at: now
+          })
+          .eq("id", id);
+
         return NextResponse.json({
           success: true,
           step: "waiting_container"
@@ -83,7 +108,8 @@ export async function POST(req: Request) {
         .from("content_items")
         .update({
           workflow_state: "container_ready",
-          updated_at: new Date().toISOString()
+          next_run_at: now,
+          updated_at: now
         })
         .eq("id", id);
 
@@ -118,7 +144,7 @@ export async function POST(req: Request) {
           publish_status: "published",
           instagram_media_id: data.id,
           workflow_state: "published",
-          updated_at: new Date().toISOString()
+          updated_at: now
         })
         .eq("id", id);
 
@@ -131,7 +157,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
-      message: "No action needed"
+      step: "noop"
     });
 
   } catch (err) {
