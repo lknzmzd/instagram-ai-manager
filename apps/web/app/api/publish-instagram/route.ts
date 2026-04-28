@@ -3,8 +3,6 @@ import { supabaseAdmin } from "@/lib/supabase";
 
 const GRAPH_URL = "https://graph.facebook.com/v24.0";
 
-export const runtime = "edge";
-
 export async function POST(req: Request) {
   try {
     const { id } = await req.json();
