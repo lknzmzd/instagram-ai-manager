@@ -101,13 +101,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    console.log("WORKER_SELECTED_ITEM", item);
+
     if (!item) {
+      const { data: debugRows } = await supabaseAdmin
+        .from("content_items")
+        .select("id,status,publish_status,workflow_state,queue_status,public_image_url,next_run_at")
+        .order("created_at", { ascending: false })
+        .limit(5);
+
       return NextResponse.json({
         success: true,
         skipped: true,
-        reason: "No automation item ready"
+        reason: "No automation item ready",
+        debugRows
       });
     }
+
+    // ONLY AFTER this point item is guaranteed NOT NULL
 
     const retryCount = Number(item.retry_count ?? 0);
 
