@@ -28,7 +28,7 @@ function isPublishSlot(berlinTime: string) {
     const [slotHour, slotMinute] = slot.split(":").map(Number);
     const slotTotal = slotHour * 60 + slotMinute;
 
-    return nowTotal >= slotTotal && nowTotal < slotTotal + 5;
+    return nowTotal >= slotTotal && nowTotal < slotTotal + 15;
   });
 }
 
