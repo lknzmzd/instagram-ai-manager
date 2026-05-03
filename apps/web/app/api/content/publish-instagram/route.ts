@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runPublishFlow } from "@/lib/instagram/publishFlow";
+import { logPostResult } from "@/lib/logger";
 
 export async function POST(req: Request) {
   let contentItemId: string | null = null;
 
   try {
     const { id } = await req.json();
-
     contentItemId = id ?? null;
 
     if (!id) {
@@ -34,8 +34,11 @@ export async function POST(req: Request) {
       return NextResponse.json({
         success: true,
         item_id: id,
+        published: true,
         skipped: true,
-        reason: "Already published"
+        reason: "Already published",
+        instagramMediaId: item.instagram_media_id ?? null,
+        item
       });
     }
 
@@ -60,46 +63,31 @@ export async function POST(req: Request) {
       );
     }
 
-    await supabaseAdmin
+    const result = await runPublishFlow(item, supabaseAdmin);
+
+    const { data: refreshed } = await supabaseAdmin
       .from("content_items")
-      .update({
-        queue_status: "processing",
-        last_error: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", id);
+      .select("*")
+      .eq("id", id)
+      .single();
 
-    try {
-      const result = await runPublishFlow(item, supabaseAdmin);
+    return NextResponse.json({
+      success: true,
+      item_id: id,
+      published: result.step === "published",
+      instagramMediaId: result.step === "published" ? result.media_id : null,
+      result,
+      item: refreshed ?? item
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown publish error";
 
-      const queueStatus =
-        result.step === "published"
-          ? "posted"
-          : result.step === "waiting_container"
-            ? "waiting"
-            : "processing";
-
-      await supabaseAdmin
+    if (contentItemId) {
+      const { data: current } = await supabaseAdmin
         .from("content_items")
-        .update({
-          queue_status: queueStatus,
-          last_error: null,
-          next_run_at:
-            result.step === "waiting_container"
-              ? new Date(Date.now() + 60 * 1000).toISOString()
-              : null,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", id);
-
-      return NextResponse.json({
-        success: true,
-        item_id: id,
-        result
-      });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Unknown publish error";
+        .select("retry_count")
+        .eq("id", contentItemId)
+        .single();
 
       await supabaseAdmin
         .from("content_items")
@@ -107,34 +95,17 @@ export async function POST(req: Request) {
           workflow_state: "failed",
           queue_status: "failed",
           last_error: message,
-          retry_count: Number(item.retry_count ?? 0) + 1,
+          retry_count: Number(current?.retry_count ?? 0) + 1,
           next_run_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           updated_at: new Date().toISOString()
         })
-        .eq("id", id);
-
-      return NextResponse.json(
-        {
-          success: false,
-          item_id: id,
-          error: message
-        },
-        { status: 500 }
-      );
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-
-    if (contentItemId) {
-      await supabaseAdmin
-        .from("content_items")
-        .update({
-          workflow_state: "failed",
-          queue_status: "failed",
-          last_error: message,
-          updated_at: new Date().toISOString()
-        })
         .eq("id", contentItemId);
+
+      await logPostResult({
+        contentItemId,
+        status: "failed",
+        errorMessage: message
+      }).catch(() => null);
     }
 
     return NextResponse.json(

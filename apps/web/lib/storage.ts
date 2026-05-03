@@ -54,27 +54,33 @@ export async function uploadGeneratedImageToStorage(params: {
     throw new Error(`Storage upload failed: ${uploadError.message}`);
   }
 
-  const { data: publicData } = supabaseAdmin.storage
+  // Do not trust getPublicUrl as proof that the bucket is publicly readable.
+  // Supabase can return a public-looking URL for a private bucket, and Meta will
+  // fail to fetch it during Instagram container creation. A signed URL is safer.
+  const expires = 60 * 60 * 24 * 30; // 30 days
+  const { data: signedData, error: signedError } = await supabaseAdmin.storage
     .from("instagram-media")
-    .getPublicUrl(path);
+    .createSignedUrl(path, expires);
 
-  let publicUrl = publicData?.publicUrl ?? null;
-
-  if (!publicUrl) {
-    const expires = 60 * 60 * 24 * 7; // 7 days
-    const { data: signedData, error: signedError } = await supabaseAdmin.storage
+  if (signedError || !signedData?.signedUrl) {
+    const { data: publicData } = supabaseAdmin.storage
       .from("instagram-media")
-      .createSignedUrl(path, expires);
+      .getPublicUrl(path);
 
-    if (signedError || !signedData?.signedUrl) {
+    const publicUrl = publicData?.publicUrl ?? null;
+
+    if (!publicUrl) {
       throw new Error("Failed to get public or signed URL from storage");
     }
 
-    publicUrl = signedData.signedUrl;
+    return {
+      path,
+      publicUrl
+    };
   }
 
   return {
     path,
-    publicUrl
+    publicUrl: signedData.signedUrl
   };
 }

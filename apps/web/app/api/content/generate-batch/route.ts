@@ -138,7 +138,7 @@ function buildPostingSlots(params: {
   timeZone: string;
   startDate: string;
 }) {
-  const postingHours = [9, 12, 18];
+  const postingHours = [9, 15, 21];
   const slots: string[] = [];
 
   for (let i = 0; i < params.count; i++) {

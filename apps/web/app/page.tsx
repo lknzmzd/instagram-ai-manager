@@ -498,22 +498,31 @@ export default function HomePage() {
         error?: string;
         instagramMediaId?: string | null;
         success?: boolean;
+        published?: boolean;
+        result?: { step?: string };
       }>(res);
 
       if (!res.ok) {
         throw new Error(data?.error || "Failed to publish to Instagram");
       }
 
-      setItems((prev) => prev.map((item) => (item.id === id ? data.item! : item)));
+      if (data.item) {
+        setItems((prev) =>
+          prev.map((item) => (item.id === id ? data.item! : item))
+        );
+      }
+
       await loadLogs();
       await loadTokenHealth();
       await loadQueue();
 
-      setMessage(
-        data.instagramMediaId
-          ? `Published to Instagram successfully (${data.instagramMediaId})`
-          : "Published to Instagram successfully"
-      );
+      if (data.published && data.instagramMediaId) {
+        setMessage(`Published to Instagram successfully (${data.instagramMediaId})`);
+      } else {
+        setMessage(
+          `Instagram container is ${data.result?.step || "processing"}. Try again in a minute if it is not posted yet.`
+        );
+      }
     } catch (error) {
       console.error(error);
       alert(

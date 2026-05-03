@@ -99,15 +99,15 @@ export async function POST(req: Request) {
       );
     }
 
-    const model = "gpt-image-1";
-
     let imageResponse;
 
     try {
       imageResponse = await openai.images.generate({
-        model: "gpt-image-1",
+        model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1",
         prompt: promptText,
-        size: "1024x1536"
+        // Instagram image publishing requires an aspect ratio between 4:5 and 1.91:1.
+        // Square is the safest default and avoids silent Meta container failures.
+        size: "1024x1024"
       });
       console.log("IMAGE RESPONSE:", JSON.stringify(imageResponse, null, 2));
     } catch (err: any) {
