@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runPublishFlow } from "@/lib/instagram/publishFlow";
 
-const VERSION = "V7_SINGLE_PASS_PUBLISHER";
-const ALLOWED_SLOTS = ["09:00", "15:00", "21:00"];
+const VERSION = "V7_1_DUE_SCHEDULE_WORKER";
 const MAX_RETRIES = 5;
+const DEFAULT_MIN_POST_GAP_MINUTES = 300; // 5 hours: allows 09:00, 15:00, 21:00 without bursts.
+const OPERATIONAL_START_MINUTE = 8 * 60 + 45; // 08:45 Berlin
+const OPERATIONAL_END_MINUTE = 21 * 60 + 30; // 21:30 Berlin
 
 function isAuthorized(req: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -26,16 +28,33 @@ function getBerlinTimeHHMM(date: Date) {
   }).format(date);
 }
 
-function isPublishSlot(berlinTime: string) {
-  const [nowHour, nowMinute] = berlinTime.split(":").map(Number);
-  const nowTotal = nowHour * 60 + nowMinute;
+function getBerlinMinuteOfDay(date: Date) {
+  const [hour, minute] = getBerlinTimeHHMM(date).split(":").map(Number);
+  return hour * 60 + minute;
+}
 
-  return ALLOWED_SLOTS.some((slot) => {
-    const [slotHour, slotMinute] = slot.split(":").map(Number);
-    const slotTotal = slotHour * 60 + slotMinute;
+function isOperationalWindow(date: Date) {
+  const minuteOfDay = getBerlinMinuteOfDay(date);
+  return (
+    minuteOfDay >= OPERATIONAL_START_MINUTE &&
+    minuteOfDay <= OPERATIONAL_END_MINUTE
+  );
+}
 
-    return nowTotal >= slotTotal && nowTotal < slotTotal + 20;
-  });
+function getMinPostGapMinutes() {
+  const raw = process.env.MIN_POST_GAP_MINUTES;
+  const parsed = raw ? Number(raw) : DEFAULT_MIN_POST_GAP_MINUTES;
+
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_MIN_POST_GAP_MINUTES;
+  }
+
+  return parsed;
+}
+
+function isForce(req: NextRequest) {
+  const value = req.nextUrl.searchParams.get("force");
+  return value === "1" || value === "true" || value === "yes";
 }
 
 async function callInternalJson(
@@ -89,6 +108,20 @@ async function getDueItem(nowIso: string) {
     .maybeSingle();
 }
 
+async function getRecentPublishedItem(now: Date, gapMinutes: number) {
+  const sinceIso = new Date(now.getTime() - gapMinutes * 60 * 1000).toISOString();
+
+  return supabaseAdmin
+    .from("content_items")
+    .select("id, concept_title, published_at, instagram_media_id")
+    .eq("publish_status", "published")
+    .not("published_at", "is", null)
+    .gte("published_at", sinceIso)
+    .order("published_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+}
+
 async function markPermanentFailure(item: any, message: string) {
   await supabaseAdmin
     .from("content_items")
@@ -129,17 +162,8 @@ async function handle(req: NextRequest) {
     const nowDate = new Date();
     const nowIso = nowDate.toISOString();
     const berlinTime = getBerlinTimeHHMM(nowDate);
-
-    if (!isPublishSlot(berlinTime)) {
-      return NextResponse.json({
-        success: true,
-        skipped: true,
-        version: VERSION,
-        reason: "Not a publish slot",
-        berlin_time: berlinTime,
-        allowed_slots: ALLOWED_SLOTS
-      });
-    }
+    const force = isForce(req);
+    const minPostGapMinutes = getMinPostGapMinutes();
 
     const { data: item, error } = await getDueItem(nowIso);
 
@@ -159,9 +183,60 @@ async function handle(req: NextRequest) {
         success: true,
         skipped: true,
         version: VERSION,
-        reason: "No due publish-ready item found",
-        berlin_time: berlinTime
+        reason: "No due item found",
+        berlin_time: berlinTime,
+        now: nowIso,
+        mode: force ? "force" : "scheduled"
       });
+    }
+
+    if (!force && !isOperationalWindow(nowDate)) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        version: VERSION,
+        item_id: item.id,
+        concept_title: item.concept_title,
+        reason: "Due item exists, but current Berlin time is outside operational window",
+        berlin_time: berlinTime,
+        operational_window: "08:45-21:30 Europe/Berlin",
+        scheduled_for: item.scheduled_for
+      });
+    }
+
+    if (!force && minPostGapMinutes > 0) {
+      const { data: recent, error: recentError } = await getRecentPublishedItem(
+        nowDate,
+        minPostGapMinutes
+      );
+
+      if (recentError) {
+        return NextResponse.json(
+          {
+            success: false,
+            version: VERSION,
+            error: recentError.message
+          },
+          { status: 500 }
+        );
+      }
+
+      if (recent) {
+        return NextResponse.json({
+          success: true,
+          skipped: true,
+          version: VERSION,
+          reason: "Recent post already published; skipping to prevent burst posting",
+          berlin_time: berlinTime,
+          min_post_gap_minutes: minPostGapMinutes,
+          recent_post: recent,
+          next_due_item: {
+            id: item.id,
+            concept_title: item.concept_title,
+            scheduled_for: item.scheduled_for
+          }
+        });
+      }
     }
 
     const retryCount = Number(item.retry_count ?? 0);
@@ -248,9 +323,12 @@ async function handle(req: NextRequest) {
         success: true,
         version: VERSION,
         item_id: current.id,
+        concept_title: current.concept_title,
+        scheduled_for: current.scheduled_for,
         published: result.step === "published",
         instagramMediaId: result.step === "published" ? result.media_id : null,
         berlin_time: berlinTime,
+        mode: force ? "force" : "scheduled",
         result
       });
     } catch (error) {
@@ -264,6 +342,7 @@ async function handle(req: NextRequest) {
           success: false,
           version: VERSION,
           item_id: current.id,
+          concept_title: current.concept_title,
           error: message
         },
         { status: 500 }
