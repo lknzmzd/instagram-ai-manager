@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runPublishFlow } from "@/lib/instagram/publishFlow";
 
-const VERSION = "V7_1_DUE_SCHEDULE_WORKER";
+const VERSION = "V7_2_READY_MEDIA_WORKER";
 const MAX_RETRIES = 5;
 const DEFAULT_MIN_POST_GAP_MINUTES = 300; // 5 hours: allows 09:00, 15:00, 21:00 without bursts.
 const OPERATIONAL_START_MINUTE = 8 * 60 + 45; // 08:45 Berlin
@@ -57,39 +57,10 @@ function isForce(req: NextRequest) {
   return value === "1" || value === "true" || value === "yes";
 }
 
-async function callInternalJson(
-  req: NextRequest,
-  path: string,
-  payload: Record<string, unknown>
-) {
-  const origin = new URL(req.url).origin;
-
-  const res = await fetch(`${origin}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload),
-    cache: "no-store"
-  });
-
-  const raw = await res.text();
-
-  let data: any;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    data = { raw };
-  }
-
-  return {
-    ok: res.ok,
-    status: res.status,
-    data
-  };
-}
-
-async function getDueItem(nowIso: string) {
+async function getDueReadyItem(nowIso: string) {
+  // Publisher should publish only media-ready rows. Image generation is deliberately
+  // kept out of the cron worker because OpenAI/image calls can timeout and block
+  // already-rendered posts behind one bad unrendered row.
   return supabaseAdmin
     .from("content_items")
     .select("*")
@@ -98,10 +69,31 @@ async function getDueItem(nowIso: string) {
     .neq("publish_status", "published")
     .not("scheduled_for", "is", null)
     .lte("scheduled_for", nowIso)
+    .not("public_image_url", "is", null)
+    .neq("public_image_url", "")
     .not("queue_status", "eq", "posted")
     .not("queue_status", "eq", "permanently_failed")
     .not("queue_status", "eq", "skipped")
     .or(`next_run_at.is.null,next_run_at.lte.${nowIso}`)
+    .order("scheduled_for", { ascending: true })
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+}
+
+async function getOldestDueUnreadyItem(nowIso: string) {
+  return supabaseAdmin
+    .from("content_items")
+    .select("id, concept_title, scheduled_for, render_status, queue_status, retry_count, last_error")
+    .eq("status", "approved")
+    .eq("prompt_status", "approved")
+    .neq("publish_status", "published")
+    .not("scheduled_for", "is", null)
+    .lte("scheduled_for", nowIso)
+    .or("public_image_url.is.null,public_image_url.eq.")
+    .not("queue_status", "eq", "posted")
+    .not("queue_status", "eq", "permanently_failed")
+    .not("queue_status", "eq", "skipped")
     .order("scheduled_for", { ascending: true })
     .order("created_at", { ascending: true })
     .limit(1)
@@ -165,7 +157,7 @@ async function handle(req: NextRequest) {
     const force = isForce(req);
     const minPostGapMinutes = getMinPostGapMinutes();
 
-    const { data: item, error } = await getDueItem(nowIso);
+    const { data: item, error } = await getDueReadyItem(nowIso);
 
     if (error) {
       return NextResponse.json(
@@ -179,14 +171,20 @@ async function handle(req: NextRequest) {
     }
 
     if (!item) {
+      const { data: blocked, error: blockedError } = await getOldestDueUnreadyItem(nowIso);
+
       return NextResponse.json({
         success: true,
         skipped: true,
         version: VERSION,
-        reason: "No due item found",
+        reason: blocked
+          ? "Due items exist, but none are media-ready. Render images first."
+          : "No due media-ready item found",
         berlin_time: berlinTime,
         now: nowIso,
-        mode: force ? "force" : "scheduled"
+        mode: force ? "force" : "scheduled",
+        blocked_unrendered_item: blocked || null,
+        blocked_error: blockedError?.message || null
       });
     }
 
@@ -262,58 +260,20 @@ async function handle(req: NextRequest) {
       })
       .eq("id", item.id);
 
-    let current = item;
+    const current = item;
 
     if (!current.public_image_url) {
-      const generated = await callInternalJson(req, "/api/content/generate-image", {
-        id: current.id
-      });
-
-      if (!generated.ok) {
-        const msg =
-          generated.data?.error ||
-          generated.data?.raw ||
-          "Failed to generate image";
-
-        await markRetryFailure(current, String(msg));
-
-        return NextResponse.json(
-          {
-            success: false,
-            version: VERSION,
-            step: "generate_image",
-            item_id: current.id,
-            error: msg,
-            meta: generated.data
-          },
-          { status: 500 }
-        );
-      }
-
-      const { data: refreshed, error: refreshError } = await supabaseAdmin
-        .from("content_items")
-        .select("*")
-        .eq("id", current.id)
-        .single();
-
-      if (refreshError || !refreshed?.public_image_url) {
-        const msg = "Image generated but public_image_url is still missing";
-
-        await markRetryFailure(current, msg);
-
-        return NextResponse.json(
-          {
-            success: false,
-            version: VERSION,
-            step: "verify_public_image_url",
-            item_id: current.id,
-            error: msg
-          },
-          { status: 500 }
-        );
-      }
-
-      current = refreshed;
+      return NextResponse.json(
+        {
+          success: false,
+          version: VERSION,
+          step: "media_ready_guard",
+          item_id: current.id,
+          concept_title: current.concept_title,
+          error: "Worker selected an item without public_image_url. This should not happen in V7.2."
+        },
+        { status: 500 }
+      );
     }
 
     try {
