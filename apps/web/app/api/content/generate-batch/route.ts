@@ -183,7 +183,7 @@ export async function POST(req: NextRequest) {
 
     const { data: recentRows } = await supabaseAdmin
       .from("content_items")
-      .select("concept_title")
+      .select("concept_title, image_prompt, visual_brief, on_image_text, caption")
       .eq("page_id", page.id)
       .order("created_at", { ascending: false })
       .limit(20);
@@ -191,11 +191,21 @@ export async function POST(req: NextRequest) {
     const recentConcepts =
       recentRows?.map((row) => row.concept_title).filter(Boolean) ?? [];
 
+    const recentVisuals =
+      recentRows
+        ?.map((row) =>
+          [row.image_prompt, row.visual_brief, row.on_image_text, row.caption]
+            .filter(Boolean)
+            .join(". ")
+        )
+        .filter(Boolean) ?? [];
+
     const items = await generateBatch({
       page,
       count: parsed.count,
       goal: parsed.goal,
-      recentConcepts
+      recentConcepts,
+      recentVisuals
     });
 
     const batchId = getBatchId();
@@ -223,6 +233,9 @@ export async function POST(req: NextRequest) {
       caption: item.caption,
       hashtags: item.hashtags,
       voiceover_script: item.voiceover_script,
+      image_prompt: [item.concept_title, item.visual_brief, item.on_image_text]
+        .filter(Boolean)
+        .join(". "),
 
       automation_batch_id: parsed.auto_queue ? batchId : null,
       scheduled_for: parsed.auto_queue ? slots[index] : null,

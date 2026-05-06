@@ -10,8 +10,9 @@ export async function generateBatch(params: {
   count: number;
   goal: string;
   recentConcepts?: string[];
+  recentVisuals?: string[];
 }): Promise<GeneratedContentItem[]> {
-  const { page, count, goal, recentConcepts = [] } = params;
+  const { page, count, goal, recentConcepts = [], recentVisuals = [] } = params;
 
   const prompt = `
 Generate ${count} Instagram content ideas for this page.
@@ -26,7 +27,18 @@ Caption rules: ${JSON.stringify(page.caption_rules)}
 Hashtag rules: ${JSON.stringify(page.hashtag_rules)}
 Default format: ${page.default_format}
 Goal: ${goal}
-Avoid repeating these concepts: ${JSON.stringify(recentConcepts)}
+Avoid repeating these recent concept titles: ${JSON.stringify(recentConcepts)}
+Avoid repeating these recent visual prompts/briefs: ${JSON.stringify(recentVisuals)}
+
+Hard diversity rules:
+- Do not create two consecutive items with the same main setting.
+- Max 2 hallway/corridor visuals in the entire batch.
+- Max 2 staircase/stairwell visuals in the entire batch.
+- Max 2 human-shadow/silhouette visuals in the entire batch.
+- Use at least 6 different visual lanes across the batch: corridor, staircase, doorway, object close-up, room corner, exterior night, reflection/mirror, abstract texture, signage/symbol, distorted camera frame.
+- Every item must have a distinct subject, camera angle, distance, texture, and light source.
+- Do not reuse the same nouns repeatedly: hallway, corridor, stair, shadow, silhouette, doorway.
+- If the page style is dark/minimal, keep the mood but vary the object/scene architecture.
 
 Return strict JSON array only.
 Each item must include:
