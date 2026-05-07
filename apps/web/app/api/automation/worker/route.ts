@@ -464,7 +464,13 @@ async function handle(req: NextRequest) {
     const force = isForce(req);
     const minPostGapMinutes = getMinPostGapMinutes();
 
-    const { error, item, skippedDuplicates } = await selectNonDuplicateCandidate(nowIso);
+    const {
+      error,
+      item: selectedItem,
+      skippedDuplicates
+    } = await selectNonDuplicateCandidate(nowIso);
+
+    let item = selectedItem;
 
     if (error) {
       return NextResponse.json(
@@ -604,7 +610,7 @@ async function handle(req: NextRequest) {
           step: "media_ready_guard",
           item_id: item.id,
           concept_title: item.concept_title,
-          error: "Worker selected an item without public_image_url. This should not happen in V7.3."
+          error: "Worker selected an item without public_image_url. This should not happen in V7.4."
         },
         { status: 500 }
       );
