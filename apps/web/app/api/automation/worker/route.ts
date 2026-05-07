@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runPublishFlow } from "@/lib/instagram/publishFlow";
 
-const VERSION = "V7_3_DEDUP_READY_MEDIA_WORKER";
+const VERSION = "V7_4_ATOMIC_CLAIM_WORKER";
 const MAX_RETRIES = 5;
 const MAX_CANDIDATES = 10;
 const DEFAULT_MIN_POST_GAP_MINUTES = 300; // 5 hours: allows 09:00, 15:00, 21:00 without bursts.
@@ -339,6 +339,28 @@ async function getRecentPublishedItem(now: Date, gapMinutes: number) {
     .maybeSingle();
 }
 
+
+async function claimCandidate(item: ContentItem) {
+  // Atomic row claim. This prevents two cron invocations from publishing the same row.
+  // Postgres evaluates the WHERE condition at update time, so only one request can move
+  // a ready row into processing. The loser gets zero rows back and must skip.
+  return supabaseAdmin
+    .from("content_items")
+    .update({
+      queue_status: "processing",
+      workflow_state: "publishing",
+      last_error: null,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", item.id)
+    .neq("publish_status", "published")
+    .not("public_image_url", "is", null)
+    .neq("public_image_url", "")
+    .or("queue_status.is.null,queue_status.eq.ready,queue_status.eq.failed")
+    .select("*")
+    .maybeSingle();
+}
+
 async function markDuplicateSkip(item: ContentItem, duplicate: DuplicateReason) {
   const message = `Skipped duplicate/near-duplicate before publishing: ${duplicate.reason}`;
 
@@ -542,14 +564,37 @@ async function handle(req: NextRequest) {
       });
     }
 
-    await supabaseAdmin
-      .from("content_items")
-      .update({
-        queue_status: "processing",
-        last_error: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", item.id);
+    const { data: claimedItem, error: claimError } = await claimCandidate(item);
+
+    if (claimError) {
+      return NextResponse.json(
+        {
+          success: false,
+          version: VERSION,
+          step: "atomic_claim",
+          item_id: item.id,
+          concept_title: item.concept_title,
+          error: claimError.message
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!claimedItem) {
+      return NextResponse.json({
+        success: true,
+        skipped: true,
+        version: VERSION,
+        reason: "Candidate was already claimed or published by another worker invocation",
+        item_id: item.id,
+        concept_title: item.concept_title,
+        berlin_time: berlinTime,
+        mode: force ? "force" : "scheduled",
+        skipped_duplicates: skippedDuplicates
+      });
+    }
+
+    item = claimedItem;
 
     if (!item.public_image_url) {
       return NextResponse.json(
